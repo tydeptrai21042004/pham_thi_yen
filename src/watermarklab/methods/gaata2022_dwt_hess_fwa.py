@@ -34,12 +34,13 @@ class Gaata2022DWTHessFWA:
         -> add hybrid Gaussian/exponential chaotic keys -> 4x4 Hessenberg blocks
         -> embed bit by parity of a selected H coefficient -> inverse transform.
 
-    Practical note:
-        The published decimal-digit rule is very fragile after uint8 saving.  The default
-        common-benchmark mode uses decimal_position=-1, which is a quantization-aware
-        version of the same parity rule and preserves clean extraction from normal uint8
-        images while keeping PSNR high.  Set decimal_position=3 for a stricter decimal
-        reproduction; tests include exact-float validation for that mode.
+    Reproduction modes:
+        adapt:
+            Fast common-benchmark mode. It keeps the package runnable for all baselines.
+        original-rerun:
+            Paper-faithful local rerun mode for this baseline. It switches on the
+            decimal-digit Hessenberg rule, uses stronger chaotic keys, and runs the
+            larger FWA-style search configured from the paper settings.
     """
 
     name = "Gaata2022_DWT_Hess_FWA"
@@ -59,9 +60,25 @@ class Gaata2022DWTHessFWA:
         mode: str = "adapt",
     ):
         self.mode = str(mode)
+
         if self.mode == "original-rerun":
+            # Paper-faithful correction requested by the user:
+            #   * use the decimal digit after the floating point instead of the
+            #     quantization-aware parity shortcut used by the quick adapted mode;
+            #   * use a stronger chaotic-key contribution than 0.020;
+            #   * run the larger Firework Algorithm setting reported in the paper
+            #     (population N=100 and mutation-spark number=5).
+            #
+            # The paper does not state an exact iteration count, so we use at least
+            # 10 optimizer iterations for a serious local rerun while still allowing
+            # a caller to pass a larger value.
             decimal_position = 3
+            key_strength = 1.0
             use_fwa = True
+            fwa_population = max(int(fwa_population), 100)
+            fwa_iterations = max(int(fwa_iterations), 10)
+            fwa_sparks = max(int(fwa_sparks), 5)
+
         self.config = WatermarkConfig(
             block_size=int(block_size),
             h_position=tuple(h_position),

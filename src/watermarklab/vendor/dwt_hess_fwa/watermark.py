@@ -33,7 +33,7 @@ class WatermarkConfig:
     block_size: int = 4
     h_position: Tuple[int, int] = (3, 3)  # zero-based version of paper's example (4,4)
     decimal_position: int = 3             # digit after decimal point used for parity
-    key_strength: float = 0.020           # chaotic key amplitude added to EM
+    key_strength: float = 0.020           # quick-run default; original-rerun overrides to 1.0
     key_params: Tuple[float, float, float, float] = (0.21, 0.37, 4.90, 0.18)
     use_min_shift: bool = True
     clip_output: bool = True
