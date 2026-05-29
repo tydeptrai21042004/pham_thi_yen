@@ -71,6 +71,20 @@ def gaussian_noise(image: Array, sigma: float = 5.0, seed: int = 123, **kwargs) 
     return _u8(img + rng.normal(0.0, float(sigma), img.shape))
 
 
+def gaussian_noise_var(image: Array, variance: float = 0.003, seed: int = 123, **kwargs) -> Array:
+    """Add zero-mean Gaussian noise using variance on normalized [0,1] pixels.
+
+    Several watermarking papers report Gaussian noise levels such as 0.003 or
+    0.005 as variance in the normalized image domain.  This attack keeps those
+    levels separate from ``gaussian_noise``, whose ``sigma`` is measured in
+    8-bit pixel units.
+    """
+    rng = np.random.default_rng(int(seed))
+    img = _u8(image).astype(np.float64) / 255.0
+    noisy = img + rng.normal(0.0, math.sqrt(max(float(variance), 0.0)), img.shape)
+    return _u8(noisy * 255.0)
+
+
 def salt_pepper(image: Array, amount: float = 0.005, seed: int = 123, **kwargs) -> Array:
     rng = np.random.default_rng(int(seed))
     out = _u8(image).copy()
@@ -348,11 +362,32 @@ def color_quantization(image: Array, colors: int = 64, **kwargs) -> Array:
     return np.asarray(q.convert('RGB'), dtype=np.uint8)
 
 
+def combined_attack(image: Array, steps: Iterable[dict] | None = None, **kwargs) -> Array:
+    """Apply a deterministic sequence of attacks to the same image.
+
+    Example step item: ``{"group": "jpeg", "params": {"quality": 70}}``.
+    This makes combined attacks first-class benchmark entries while preserving
+    output shape and deterministic seeding.
+    """
+    out = _u8(image).copy()
+    for step in list(steps or []):
+        group = str(step.get("group", "")).strip()
+        params = dict(step.get("params", {}))
+        if group == "combined":
+            raise ValueError("Nested combined attacks are not supported.")
+        if group not in _ATTACK_FUNCS:
+            raise ValueError(f"Unknown combined attack group: {group}")
+        out = _ATTACK_FUNCS[group](out, **params)
+        out = _u8(out)
+    return out
+
+
 _ATTACK_FUNCS: dict[str, Callable[..., Array]] = {
     "none": no_attack,
     "jpeg": jpeg,
     "jpeg2000": jpeg2000,
     "gaussian_noise": gaussian_noise,
+    "gaussian_noise_var": gaussian_noise_var,
     "salt_pepper": salt_pepper,
     "speckle_noise": speckle_noise,
     "poisson_noise": poisson_noise,
@@ -384,6 +419,7 @@ _ATTACK_FUNCS: dict[str, Callable[..., Array]] = {
     "checkerboard_cutout": checkerboard_cutout,
     "border_crop_pad": border_crop_pad,
     "color_quantization": color_quantization,
+    "combined": combined_attack,
 }
 
 
@@ -550,6 +586,74 @@ def script_attack_suite(include_none: bool = True) -> list[AttackConfig]:
     return attacks if include_none else attacks[1:]
 
 
+def requested_attack_suite(include_none: bool = True) -> list[AttackConfig]:
+    """Attack suite requested for paper-style watermark robustness testing.
+
+    Includes exactly the requested single attacks: blur, sharpening, salt &
+    pepper at 0.05/0.10, Gaussian noise variance 0.003/0.005, median/average
+    filters, lowpass, JPEG QF 90/70/50, JPEG2000 ratios 3:1/5:1/10:1,
+    rotation, crop, gamma, histogram, plus several combined attacks.
+    """
+    attacks = [
+        AttackConfig("no_attack", "none", {}),
+        # Requested single attacks
+        AttackConfig("blur_1", "gaussian_blur", {"radius": 1.0}),
+        AttackConfig("sharpening_1", "unsharp_mask", {"radius": 1.0, "percent": 100, "threshold": 0}),
+        AttackConfig("sharpening_1p5", "unsharp_mask", {"radius": 1.0, "percent": 150, "threshold": 0}),
+        AttackConfig("salt_pepper_0p05", "salt_pepper", {"amount": 0.05, "seed": 123}),
+        AttackConfig("salt_pepper_0p10", "salt_pepper", {"amount": 0.10, "seed": 123}),
+        AttackConfig("gaussian_noise_var_0p003", "gaussian_noise_var", {"variance": 0.003, "seed": 123}),
+        AttackConfig("gaussian_noise_var_0p005", "gaussian_noise_var", {"variance": 0.005, "seed": 123}),
+        AttackConfig("median_filter_3x3", "median_filter", {"size": 3}),
+        AttackConfig("average_filter_3x3", "average_filter", {"size": 3}),
+        AttackConfig("lowpass_filter_5x5", "lowpass", {"size": 5}),
+        AttackConfig("jpeg_qf90", "jpeg", {"quality": 90}),
+        AttackConfig("jpeg_qf70", "jpeg", {"quality": 70}),
+        AttackConfig("jpeg_qf50", "jpeg", {"quality": 50}),
+        AttackConfig("jpeg2000_3_to_1", "jpeg2000", {"quality_layer": 3.0}),
+        AttackConfig("jpeg2000_5_to_1", "jpeg2000", {"quality_layer": 5.0}),
+        AttackConfig("jpeg2000_10_to_1", "jpeg2000", {"quality_layer": 10.0}),
+        AttackConfig("rotate_5deg", "rotation", {"degrees": 5.0}),
+        AttackConfig("rotate_10deg", "rotation", {"degrees": 10.0}),
+        AttackConfig("rotate_45deg", "rotation", {"degrees": 45.0}),
+        AttackConfig("crop_95", "crop_resize", {"keep": 0.95}),
+        AttackConfig("crop_90", "crop_resize", {"keep": 0.90}),
+        AttackConfig("crop_75", "crop_resize", {"keep": 0.75}),
+        AttackConfig("gamma_0p75", "gamma", {"gamma": 0.75}),
+        AttackConfig("gamma_1p0", "gamma", {"gamma": 1.0}),
+        AttackConfig("gamma_1p2", "gamma", {"gamma": 1.2}),
+        AttackConfig("gamma_1p5", "gamma", {"gamma": 1.5}),
+        AttackConfig("histogram", "hist_equalization", {}),
+        # Combined attacks
+        AttackConfig("combined_jpeg70_blur1", "combined", {"steps": [
+            {"group": "jpeg", "params": {"quality": 70}},
+            {"group": "gaussian_blur", "params": {"radius": 1.0}},
+        ]}),
+        AttackConfig("combined_jpeg70_saltpepper005", "combined", {"steps": [
+            {"group": "jpeg", "params": {"quality": 70}},
+            {"group": "salt_pepper", "params": {"amount": 0.05, "seed": 123}},
+        ]}),
+        AttackConfig("combined_crop90_jpeg70", "combined", {"steps": [
+            {"group": "crop_resize", "params": {"keep": 0.90}},
+            {"group": "jpeg", "params": {"quality": 70}},
+        ]}),
+        AttackConfig("combined_rotate5_crop95", "combined", {"steps": [
+            {"group": "rotation", "params": {"degrees": 5.0}},
+            {"group": "crop_resize", "params": {"keep": 0.95}},
+        ]}),
+        AttackConfig("combined_gamma12_jpeg70_blur1", "combined", {"steps": [
+            {"group": "gamma", "params": {"gamma": 1.2}},
+            {"group": "jpeg", "params": {"quality": 70}},
+            {"group": "gaussian_blur", "params": {"radius": 1.0}},
+        ]}),
+        AttackConfig("combined_histogram_jpeg70", "combined", {"steps": [
+            {"group": "hist_equalization", "params": {}},
+            {"group": "jpeg", "params": {"quality": 70}},
+        ]}),
+    ]
+    return attacks if include_none else attacks[1:]
+
+
 def grid_attack_suite(include_none: bool = True) -> list[AttackConfig]:
     """Large parameter-grid attack suite for sensitivity testing."""
     attacks: list[AttackConfig] = [AttackConfig("no_attack", "none", {})]
@@ -603,6 +707,8 @@ def default_attack_suite(include_none: bool = True, preset: str = "lite") -> lis
         return stress_attack_suite(include_none=include_none)
     if preset in {"script", "source", "source_script"}:
         return script_attack_suite(include_none=include_none)
+    if preset in {"requested", "paper", "paper_requested", "custom"}:
+        return requested_attack_suite(include_none=include_none)
     if preset in {"grid", "extended", "sweep", "variable"}:
         return grid_attack_suite(include_none=include_none)
     raise ValueError(f"Unknown attack preset: {preset}")
