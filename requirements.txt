@@ -1,0 +1,7 @@
+numpy
+pillow
+scipy
+scikit-image
+pandas
+pytest
+opencv-python

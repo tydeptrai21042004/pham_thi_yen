@@ -1,0 +1,5 @@
+method_id,paper,cover_size,watermark_size,paper_clean_psnr,paper_clean_ssim,paper_clean_ncc,paper_capacity_bpp,paper_notes
+kumar2021,Kumar and Singh 2021,512x512 color,64x64 gray,51.6145,0.9992,1,0.04166,DWT+entropy+alpha blending in YCbCr-Y
+guo2017_dwt_qr_fa,Guo et al. 2017,512x512 grayscale,64x64 binary,>35,>0.93,,0.015625,DWT+QR with FA-optimized embedding strength; paper reports NC/Corr/SSIM >0.93
+gaata2022_dwt_hess_fwa,Gaata et al. 2022,color image,secret image,39.25193,,high retrieval,,DWT+Hessenberg+FWA improves PSNR by about 1.25 dB over non-optimized version
+dwt_hd_svd_2025,Dong et al. 2024/2025,512x512 color,256x256 gray,45.3437,0.9987,1,0.6667,DWT+HD+SVD+logistic chaos; NCC above 0.95 except rotation around 0.85

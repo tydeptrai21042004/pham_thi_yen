@@ -1,0 +1,214 @@
+{
+  "params": {
+    "ok": true,
+    "checks": {
+      "block_size": true,
+      "private_key": true,
+      "arnold_iterations": true,
+      "dwt_mode": true,
+      "dwt_bands": true,
+      "host_channels": true,
+      "watermark_dwt_enabled": true,
+      "watermark_payload_band": true,
+      "q4_tau": true,
+      "q4_margin": true,
+      "h01_q": true,
+      "h01_margin": true,
+      "min_survival_rate": true,
+      "hpos_candidates": true,
+      "flags": true
+    },
+    "params": {
+      "arnold_iterations": 17,
+      "dwt_bands": [
+        "LL",
+        "HL",
+        "HH",
+        "LH"
+      ],
+      "dwt_mode": "orthonormal",
+      "block_size": 4,
+      "private_key": "KB123",
+      "repeat": null,
+      "q4_tau": 0.5,
+      "q4_margin": 0.08,
+      "h01_q": 7.0,
+      "h01_margin": 0.9,
+      "min_survival_rate": 0.75,
+      "bss_weight": 0.75,
+      "mse_weight": 0.25,
+      "max_q_cand_mse": 0.18,
+      "max_h_cand_mse": 0.24,
+      "q4_givens_theta_max": 0.42,
+      "q4_givens_coarse_steps": 13,
+      "q4_givens_fine_theta_max": 0.08,
+      "q4_givens_fine_steps": 0,
+      "q4_givens_passes": 1,
+      "q4_givens_mse_weight": 0.1,
+      "q4_givens_extra_margin_weight": 0.04,
+      "q4_givens_pairs": [
+        [
+          0,
+          2
+        ],
+        [
+          1,
+          3
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          2
+        ]
+      ],
+      "fast_candidate_scoring": true,
+      "watermark_dwt_enabled": true,
+      "watermark_payload_band": "LL",
+      "host_embed_color_space": "YCrCb",
+      "host_channels": [
+        0
+      ],
+      "structured_repetition_enabled": true
+    },
+    "contract": {
+      "host_shape": [
+        512,
+        512,
+        3
+      ],
+      "watermark_shape": [
+        64,
+        64
+      ],
+      "watermark_payload_shape": [
+        32,
+        32
+      ],
+      "watermark_payload_len": 1024,
+      "watermark_dwt_enabled": true,
+      "watermark_payload_band": "LL",
+      "host_embed_color_space": "YCrCb",
+      "block_size": 4,
+      "private_key": "KB123",
+      "arnold_iterations": 17,
+      "dwt_wavelet": "haar",
+      "dwt_level": 1,
+      "dwt_mode": "orthonormal",
+      "dwt_bands": [
+        "LL",
+        "HL",
+        "HH",
+        "LH"
+      ],
+      "host_channels": [
+        0
+      ],
+      "flag_q4": 0,
+      "flag_hpos": 1,
+      "flag_skip": 2,
+      "q4_tau": 0.5,
+      "q4_margin": 0.08,
+      "h01_q": 7.0,
+      "h01_margin": 0.9,
+      "hpos_candidates": [
+        [
+          "h21",
+          [
+            1,
+            0
+          ]
+        ],
+        [
+          "h22",
+          [
+            1,
+            1
+          ]
+        ]
+      ],
+      "min_survival_rate": 0.75,
+      "structured_repetition": true
+    }
+  },
+  "math_branches": {
+    "ok": true,
+    "checks": {
+      "q4_candidate_extracts_requested_bit": true,
+      "h_candidate_extracts_requested_bit": true,
+      "qim_residue_targets_are_exact": true
+    },
+    "q4": [
+      {
+        "bit": 0,
+        "extracted": 0,
+        "q4_stat": 0.396381352568359,
+        "ok": true
+      },
+      {
+        "bit": 1,
+        "extracted": 1,
+        "q4_stat": 0.637201413380347,
+        "ok": true
+      }
+    ],
+    "hpos": [
+      {
+        "bit": 0,
+        "candidate": "h21",
+        "extracted": 0,
+        "ok": true
+      },
+      {
+        "bit": 0,
+        "candidate": "h22",
+        "extracted": 0,
+        "ok": true
+      },
+      {
+        "bit": 1,
+        "candidate": "h21",
+        "extracted": 1,
+        "ok": true
+      },
+      {
+        "bit": 1,
+        "candidate": "h22",
+        "extracted": 1,
+        "ok": true
+      }
+    ],
+    "qim": [
+      {
+        "bit": 0,
+        "target": 1.75,
+        "residue": 1.75,
+        "ok": true
+      },
+      {
+        "bit": 1,
+        "target": 5.25,
+        "residue": 5.25,
+        "ok": true
+      }
+    ]
+  },
+  "structured_schedule": {
+    "ok": true,
+    "checks": {
+      "schedule_length_equals_usable_blocks": true,
+      "usable_blocks_equals_repeat_times_payload": true,
+      "every_payload_bit_has_equal_repetition": true,
+      "repeat_factor_within_capacity": true
+    },
+    "repeat_factor": 16,
+    "usable_blocks": 16384,
+    "total_blocks": 16384,
+    "payload_len": 1024,
+    "min_count": 16,
+    "max_count": 16
+  },
+  "ok": true
+}
