@@ -8,10 +8,16 @@ from typing import Any
 
 import cv2
 import numpy as np
+try:
+    import pywt
+except Exception:  # pragma: no cover - tests may run before requirements are installed
+    pywt = None
 from scipy.linalg import hessenberg
 
 from watermarklab.common.dwt import split_4bands, merge_4bands
 from watermarklab.common.chaos import arnold_scramble, arnold_unscramble
+from watermarklab.common.attack import default_attack_suite, apply_attack as apply_benchmark_attack, AttackConfig
+from watermarklab.common.metrics import psnr as metric_psnr, ssim as metric_ssim, nc as metric_nc, ber as metric_ber
 
 
 # =========================================================
@@ -64,6 +70,16 @@ Q4_GIVENS_PAIRS = ((0, 2), (1, 3), (0, 1), (1, 2))
 FAST_CANDIDATE_SCORING = True
 USE_STRUCTURED_REPETITION = True
 
+# Firefly optimization parameter space copied from the standalone script.
+# Only these four variables are optimized; all other parameters keep their
+# script-default values unless explicitly supplied.
+PARAM_SPECS = [
+    {"name": "q4_tau", "source_name": "Q4_TAU", "min": 0.35, "max": 0.65},
+    {"name": "q4_margin", "source_name": "Q4_MARGIN", "min": 0.04, "max": 0.14},
+    {"name": "h01_q", "source_name": "H01_Q", "min": 5.0, "max": 10.0},
+    {"name": "h01_margin", "source_name": "H01_MARGIN", "min": 0.50, "max": 1.20},
+]
+
 
 @dataclass
 class ProposalParams:
@@ -77,7 +93,9 @@ class ProposalParams:
 
     arnold_iterations: int = ARNOLD_ITERATIONS
     dwt_bands: tuple[str, ...] = DWT_BANDS
-    dwt_mode: str = "orthonormal"  # local Haar implementation equivalent to pywt.dwt2(..., 'haar') for even sizes
+    # "pywt" is the source-script-faithful mode. It calls pywt.dwt2/idwt2
+    # directly instead of the package's lightweight Haar implementation.
+    dwt_mode: str = "pywt"
     block_size: int = BLOCKSIZE
     private_key: str = PRIVATE_KEY
 
@@ -115,17 +133,47 @@ class ProposalParams:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ProposalParams":
+        """Create params from package-style or source-script-style dictionaries.
+
+        The standalone script exports uppercase names such as ``Q4_TAU`` and
+        ``H01_MARGIN``. The cleaned package uses lowercase dataclass fields.
+        Supporting both formats is important for the two-phase workflow where
+        an optimization phase writes parameters and a normal phase later reads
+        them automatically.
+        """
         params = cls()
         if not data:
             return params
+
+        aliases = {
+            "ARNOLD_ITERATIONS": "arnold_iterations",
+            "DWT_BANDS": "dwt_bands",
+            "Q4_TAU": "q4_tau",
+            "Q4_MARGIN": "q4_margin",
+            "H01_Q": "h01_q",
+            "H01_MARGIN": "h01_margin",
+            "MIN_SURVIVAL_RATE": "min_survival_rate",
+            "BSS_WEIGHT": "bss_weight",
+            "MSE_WEIGHT": "mse_weight",
+            "MAX_Q_CAND_MSE": "max_q_cand_mse",
+            "MAX_H_CAND_MSE": "max_h_cand_mse",
+            "Q4_GIVENS_THETA_MAX": "q4_givens_theta_max",
+            "Q4_GIVENS_MSE_WEIGHT": "q4_givens_mse_weight",
+            "Q4_GIVENS_EXTRA_MARGIN_WEIGHT": "q4_givens_extra_margin_weight",
+        }
+
         for key, value in data.items():
-            if not hasattr(params, key):
+            key2 = aliases.get(str(key), str(key))
+            if not hasattr(params, key2):
                 continue
-            if key in {"dwt_bands", "host_channels"}:
+            if key2 in {"dwt_bands", "host_channels"}:
                 value = tuple(value)
-            elif key == "q4_givens_pairs":
+            elif key2 == "q4_givens_pairs":
                 value = tuple(tuple(x) for x in value)
-            setattr(params, key, value)
+            setattr(params, key2, value)
+
+        # Keep H-domain margin inside the same safe interval used by the source script.
+        params.h01_margin = min(float(params.h01_margin), 0.49 * float(params.h01_q))
         return params
 
     def to_dict(self) -> dict[str, Any]:
@@ -180,6 +228,34 @@ def _flag_stats(flags):
     return q4_used, hpos_used, skip_used
 
 
+def decode_firefly_position(position: np.ndarray | list[float], base_params: ProposalParams | None = None) -> ProposalParams:
+    """Decode a normalized Firefly position into ProposalParams.
+
+    This follows the uploaded script's four-parameter search space exactly:
+    Q4_TAU, Q4_MARGIN, H01_Q, H01_MARGIN.
+    """
+    params = ProposalParams.from_dict(base_params.to_dict() if base_params is not None else None)
+    pos = np.clip(np.asarray(position, dtype=np.float64), 0.0, 1.0)
+    for idx, spec in enumerate(PARAM_SPECS):
+        z = float(pos[idx])
+        value = float(spec["min"] + z * (spec["max"] - spec["min"]))
+        setattr(params, spec["name"], value)
+    params.h01_margin = min(float(params.h01_margin), 0.49 * float(params.h01_q))
+    return params
+
+
+def firefly_cache_key(position: np.ndarray | list[float], digits: int = 4) -> tuple[float, ...]:
+    arr = np.round(np.clip(np.asarray(position, dtype=np.float64), 0.0, 1.0), int(digits))
+    return tuple(float(x) for x in arr.tolist())
+
+
+def optimization_param_snapshot(params: ProposalParams) -> dict[str, Any]:
+    """Return lowercase and source-script uppercase optimized parameters."""
+    lower = {spec["name"]: float(getattr(params, spec["name"])) for spec in PARAM_SPECS}
+    upper = {spec["source_name"]: lower[spec["name"]] for spec in PARAM_SPECS}
+    return {**lower, "source_script_names": upper}
+
+
 # =========================================================
 # RGB package I/O bridge to the source script's OpenCV-BGR domain
 # =========================================================
@@ -228,10 +304,27 @@ def _crop_for_dwt(channel_u8: np.ndarray, level: int, block_size: int):
 
 
 def _dwt_split_4bands(channel_f64: np.ndarray, params: ProposalParams):
+    """Split into LL/LH/HL/HH.
+
+    In source-script-faithful mode this calls PyWavelets exactly like:
+    ``LL, (LH, HL, HH) = pywt.dwt2(x, "haar")``. The older package-local
+    modes remain available only for backward compatibility.
+    """
+    if str(params.dwt_mode).lower() in {"pywt", "pywt_haar", "script", "source"}:
+        if pywt is not None:
+            LL, (LH, HL, HH) = pywt.dwt2(np.asarray(channel_f64, dtype=np.float64), DWT_WAVELET)
+            return {"LL": LL.copy(), "LH": LH.copy(), "HL": HL.copy(), "HH": HH.copy()}
+        # Fallback for environments that have not installed PyWavelets yet.
+        # requirements.txt/pyproject.toml include PyWavelets, so normal runs use pywt.
+        return split_4bands(channel_f64, mode="orthonormal")
     return split_4bands(channel_f64, mode=params.dwt_mode)
 
 
 def _dwt_merge_4bands(bands: dict[str, np.ndarray], params: ProposalParams):
+    if str(params.dwt_mode).lower() in {"pywt", "pywt_haar", "script", "source"}:
+        if pywt is not None:
+            return pywt.idwt2((bands["LL"], (bands["LH"], bands["HL"], bands["HH"])), DWT_WAVELET)
+        return merge_4bands(bands, mode="orthonormal")
     return merge_4bands(bands, mode=params.dwt_mode)
 
 
@@ -810,16 +903,197 @@ class ProposalQHDWTHess:
         )
         return watermarked_rgb, key
 
-    def _quick_optimize_params(self, host_rgb: np.ndarray, watermark_binary: np.ndarray) -> ProposalParams:
-        """Compatibility stub.
+    def _evaluate_params_for_optimization(
+        self,
+        host_rgb: np.ndarray,
+        watermark_binary: np.ndarray,
+        params: ProposalParams,
+        attack_suite: list[AttackConfig] | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate one candidate parameter set.
 
-        The standalone script's default main block runs a file-based Firefly
-        optimizer.  The clean benchmark API is array-based, so faithful default
-        comparison uses the fixed script parameters.  Keeping this hook avoids
-        breaking callers that pass use_optimizer=True; it returns the source
-        parameters unchanged rather than using the old ZIP-only random optimizer.
+        Objective mirrors the standalone script: if clean PSNR is above the
+        threshold, maximize 1 + mean attack NC; otherwise penalize the PSNR gap.
         """
-        return ProposalParams.from_dict(self.params.to_dict())
+        if attack_suite is None:
+            attack_suite = default_attack_suite(include_none=False, preset="lite")
+
+        result = {
+            "params": optimization_param_snapshot(params),
+            "objective": -1e9,
+            "clean_psnr": 0.0,
+            "clean_ssim": 0.0,
+            "clean_nc": 0.0,
+            "clean_ber": 1.0,
+            "mean_attack_nc": 0.0,
+            "min_attack_nc": 0.0,
+            "psnr_threshold": 55.0,
+            "psnr_feasible": False,
+            "psnr_gap": None,
+            "q4_used": None,
+            "hpos_used": None,
+            "skip_used": None,
+            "repeat_factor": None,
+            "attack_results": [],
+            "error": None,
+        }
+        try:
+            watermarked, key = self._embed_with_params(host_rgb, watermark_binary, params)
+            clean_ext = self.extract(watermarked, key, host_rgb=host_rgb)
+            clean_psnr = float(metric_psnr(host_rgb, watermarked))
+            clean_ssim = float(metric_ssim(host_rgb, watermarked))
+            clean_nc = float(metric_nc(watermark_binary, clean_ext))
+            clean_ber = float(metric_ber(watermark_binary, clean_ext))
+            q4_used, hpos_used, skip_used = _flag_stats(key.flags)
+
+            attack_ncs: list[float] = []
+            for attack in attack_suite:
+                if attack.name == "no_attack":
+                    continue
+                rec = {"attack": attack.name, "nc": 0.0, "ber": 1.0, "error": None}
+                try:
+                    attacked = apply_benchmark_attack(watermarked, attack)
+                    ext = self.extract(attacked, key, host_rgb=host_rgb)
+                    rec["nc"] = float(metric_nc(watermark_binary, ext))
+                    rec["ber"] = float(metric_ber(watermark_binary, ext))
+                    attack_ncs.append(float(rec["nc"]))
+                except Exception as e:
+                    rec["error"] = repr(e)
+                    attack_ncs.append(0.0)
+                result["attack_results"].append(rec)
+
+            mean_attack_nc = float(np.mean(attack_ncs)) if attack_ncs else clean_nc
+            min_attack_nc = float(np.min(attack_ncs)) if attack_ncs else clean_nc
+            threshold = float(result["psnr_threshold"])
+            feasible = bool(np.isfinite(clean_psnr) and clean_psnr > threshold)
+            if feasible:
+                objective = 1.0 + mean_attack_nc
+                psnr_gap = 0.0
+            else:
+                psnr_gap = max(0.0, threshold - (clean_psnr if np.isfinite(clean_psnr) else 0.0))
+                objective = -(psnr_gap / max(threshold, EPS_CONF)) + 0.001 * mean_attack_nc
+
+            result.update({
+                "objective": float(objective),
+                "clean_psnr": clean_psnr if np.isfinite(clean_psnr) else 0.0,
+                "clean_ssim": clean_ssim if np.isfinite(clean_ssim) else 0.0,
+                "clean_nc": clean_nc if np.isfinite(clean_nc) else 0.0,
+                "clean_ber": clean_ber if np.isfinite(clean_ber) else 1.0,
+                "mean_attack_nc": mean_attack_nc,
+                "min_attack_nc": min_attack_nc,
+                "psnr_feasible": feasible,
+                "psnr_gap": float(psnr_gap),
+                "q4_used": int(q4_used),
+                "hpos_used": int(hpos_used),
+                "skip_used": int(skip_used),
+                "repeat_factor": int(key.repeat_factor),
+            })
+        except Exception as e:
+            result["error"] = repr(e)
+        return result
+
+    def optimize_params(
+        self,
+        host_rgb: np.ndarray,
+        watermark_binary: np.ndarray,
+        *,
+        n_fireflies: int | None = None,
+        n_generations: int = 2,
+        alpha: float = 0.18,
+        beta0: float = 1.0,
+        gamma: float = 1.0,
+        alpha_decay: float = 0.80,
+        seed: int | None = None,
+        attack_suite: list[AttackConfig] | None = None,
+    ) -> tuple[ProposalParams, dict[str, Any]]:
+        """Run the two-phase optimization algorithm for one image.
+
+        This is an array-based Firefly implementation of the same four-parameter
+        search space as the standalone script. It returns the best parameters
+        and a serializable optimization record.
+        """
+        n_fireflies = int(n_fireflies if n_fireflies is not None else self.optimizer_trials)
+        n_generations = int(n_generations)
+        rng = np.random.default_rng(int(seed if seed is not None else self.optimizer_seed))
+        dim = len(PARAM_SPECS)
+        fireflies = rng.uniform(0.0, 1.0, size=(max(1, n_fireflies), dim))
+        scores = np.full((fireflies.shape[0],), -np.inf, dtype=np.float64)
+        cache: dict[tuple[float, ...], dict[str, Any]] = {}
+        history: list[dict[str, Any]] = []
+        best_score = -np.inf
+        best_position = fireflies[0].copy()
+        best_result: dict[str, Any] | None = None
+        current_alpha = float(alpha)
+
+        def evaluate_position(pos, generation: int, firefly_id: int):
+            nonlocal best_score, best_position, best_result
+            key = firefly_cache_key(pos)
+            if key in cache:
+                return cache[key]
+            params = decode_firefly_position(pos, self.params)
+            res = self._evaluate_params_for_optimization(host_rgb, watermark_binary, params, attack_suite=attack_suite)
+            res["generation"] = int(generation)
+            res["firefly_id"] = int(firefly_id)
+            res["position"] = [float(x) for x in np.clip(pos, 0.0, 1.0).tolist()]
+            cache[key] = res
+            hist = {k: res.get(k) for k in [
+                "generation", "firefly_id", "objective", "clean_psnr", "psnr_feasible",
+                "psnr_gap", "mean_attack_nc", "min_attack_nc", "clean_nc", "clean_ber",
+                "q4_used", "hpos_used", "skip_used", "repeat_factor", "error"
+            ]}
+            hist["params"] = res.get("params")
+            history.append(hist)
+            if float(res.get("objective", -1e9)) > best_score:
+                best_score = float(res.get("objective", -1e9))
+                best_position = np.clip(pos.copy(), 0.0, 1.0)
+                best_result = dict(res)
+            return res
+
+        for i in range(fireflies.shape[0]):
+            res = evaluate_position(fireflies[i], 0, i)
+            scores[i] = float(res.get("objective", -1e9))
+
+        for gen in range(1, n_generations + 1):
+            for i in range(fireflies.shape[0]):
+                for j in range(fireflies.shape[0]):
+                    if scores[j] > scores[i]:
+                        rij = np.linalg.norm(fireflies[i] - fireflies[j])
+                        beta = float(beta0) * math.exp(-float(gamma) * (rij ** 2))
+                        random_step = current_alpha * (rng.random(dim) - 0.5)
+                        new_pos = np.clip(fireflies[i] + beta * (fireflies[j] - fireflies[i]) + random_step, 0.0, 1.0)
+                        new_res = evaluate_position(new_pos, gen, i)
+                        new_score = float(new_res.get("objective", -1e9))
+                        if new_score > scores[i]:
+                            fireflies[i] = new_pos
+                            scores[i] = new_score
+            current_alpha *= float(alpha_decay)
+
+        best_params = decode_firefly_position(best_position, self.params)
+        final_result = self._evaluate_params_for_optimization(host_rgb, watermark_binary, best_params, attack_suite=attack_suite)
+        record = {
+            "best_position": [float(x) for x in best_position.tolist()],
+            "best_params": optimization_param_snapshot(best_params),
+            "best_result": final_result,
+            "history": history,
+            "optimizer": {
+                "algorithm": "firefly",
+                "n_fireflies": int(n_fireflies),
+                "n_generations": int(n_generations),
+                "alpha": float(alpha),
+                "beta0": float(beta0),
+                "gamma": float(gamma),
+                "alpha_decay": float(alpha_decay),
+                "seed": int(seed if seed is not None else self.optimizer_seed),
+                "param_specs": PARAM_SPECS,
+            },
+        }
+        if best_result is not None:
+            record["search_best_result"] = best_result
+        return best_params, record
+
+    def _quick_optimize_params(self, host_rgb: np.ndarray, watermark_binary: np.ndarray) -> ProposalParams:
+        params, _record = self.optimize_params(host_rgb, watermark_binary)
+        return params
 
     def embed(self, host_rgb: np.ndarray, watermark_binary: np.ndarray):
         params = self._quick_optimize_params(host_rgb, watermark_binary) if self.use_optimizer else self.params
@@ -905,6 +1179,10 @@ __all__ = [
     "FLAG_HPOS",
     "FLAG_SKIP",
     "HPOS_CANDIDATES",
+    "PARAM_SPECS",
+    "decode_firefly_position",
+    "firefly_cache_key",
+    "optimization_param_snapshot",
     "_nearest_nonnegative_mod_value",
     "_q4_stat",
     "_build_q4_candidate",

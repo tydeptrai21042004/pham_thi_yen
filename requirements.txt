@@ -5,3 +5,4 @@ scikit-image
 pandas
 pytest
 opencv-python
+PyWavelets

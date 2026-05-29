@@ -3,7 +3,7 @@ name = "watermarklab-baselines-cleaned"
 version = "0.2.0"
 description = "Clean modular benchmark for four watermarking baselines plus proposal method"
 requires-python = ">=3.10"
-dependencies = ["numpy", "pillow", "scipy", "scikit-image", "pandas", "opencv-python"]
+dependencies = ["numpy", "pillow", "scipy", "scikit-image", "pandas", "opencv-python", "PyWavelets"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

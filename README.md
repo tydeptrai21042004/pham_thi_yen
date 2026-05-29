@@ -181,3 +181,81 @@ OPENBLAS_NUM_THREADS=1 PYTHONPATH=src python main.py \
 ```
 
 `original` writes paper-reported tables. `adapt` is the actual runnable comparison on your dataset. Keep them separate in the manuscript. See `docs/ORIGINAL_VS_ADAPT_MODES.md`.
+
+---
+
+## Proposal two-phase workflow
+
+The proposal method now supports the requested two phases.
+
+### Phase 1 — optimization phase
+
+This phase runs the Firefly parameter search and exports a parameter file.
+Only the four source-script parameters are optimized:
+
+```text
+Q4_TAU, Q4_MARGIN, H01_Q, H01_MARGIN
+```
+
+Example quick optimization:
+
+```bash
+OPENBLAS_NUM_THREADS=1 PYTHONPATH=src python main.py \
+  --phase optimize \
+  --host-dir data/host \
+  --watermark data/watermark/wm.png \
+  --max-images 1 \
+  --proposal-repeat full \
+  --proposal-optimizer-fireflies 4 \
+  --proposal-optimizer-generations 2 \
+  --proposal-optimizer-attack-preset script \
+  --proposal-param-file results/proposal_optimized_params.json
+```
+
+The optimization phase writes:
+
+```text
+results/proposal_optimized_params.json
+results/proposal_optimized_params.csv
+```
+
+The JSON contains both per-image optimized parameters and a global best fallback.
+
+### Phase 2 — normal phase
+
+In normal phase, the benchmark checks `--proposal-param-file` automatically.
+If the file exists, it uses the optimized parameters. If the file does not exist,
+it uses the default source-script parameters.
+
+```bash
+OPENBLAS_NUM_THREADS=1 PYTHONPATH=src python main.py \
+  --phase normal \
+  --methods proposal \
+  --attack-preset script \
+  --proposal-repeat full \
+  --proposal-param-file results/proposal_optimized_params.json \
+  --output results/proposal_normal_with_optimized_params
+```
+
+Useful parameter-file modes:
+
+```text
+--proposal-param-mode auto      # default: use optimized file if it exists, else defaults
+--proposal-param-mode ignore    # force default parameters
+--proposal-param-mode require   # fail if optimized file is missing
+```
+
+### Attack presets
+
+Available presets are now:
+
+```text
+none    clean extraction only
+lite    quick mixed attack suite
+script  attacks aligned with the standalone Python script
+full    broad attack suite
+stress  compact harsh attack suite
+grid    large parameter sweep with many attack levels
+```
+
+Use `--attack-preset grid` when you want many attack variables for sensitivity testing.

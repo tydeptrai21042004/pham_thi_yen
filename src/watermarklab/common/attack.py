@@ -524,6 +524,73 @@ def stress_attack_suite(include_none: bool = True) -> list[AttackConfig]:
     return attacks if include_none else attacks[1:]
 
 
+
+def script_attack_suite(include_none: bool = True) -> list[AttackConfig]:
+    """Attack suite matching the standalone Python script as closely as possible.
+
+    The package stores images as RGB arrays, while the standalone script uses
+    OpenCV BGR arrays. The attack groups here are deterministic RGB equivalents
+    with the same attack names and parameter levels.
+    """
+    attacks = [
+        AttackConfig("no_attack", "none", {}),
+        AttackConfig("script_blur_sigma1", "gaussian_blur", {"radius": 1.0}),
+        AttackConfig("script_sharpen_1p0_1p5", "unsharp_mask", {"radius": 1.0, "percent": 150, "threshold": 0}),
+        AttackConfig("script_speckle_var_0p001", "speckle_noise", {"variance": 0.001, "seed": 123}),
+        AttackConfig("script_salt_pepper_0p1", "salt_pepper", {"amount": 0.1, "seed": 123}),
+        AttackConfig("script_jpeg_q90", "jpeg", {"quality": 90}),
+        AttackConfig("script_jpeg2000_7", "jpeg2000", {"quality_layer": 7.0}),
+        AttackConfig("script_lowpass_5x5", "lowpass", {"size": 5}),
+        AttackConfig("script_scale_0p5", "resize", {"factor": 0.5}),
+        AttackConfig("script_scale_4p0", "resize", {"factor": 4.0}),
+        AttackConfig("script_rotation_45deg", "rotation", {"degrees": 45.0}),
+        AttackConfig("script_histogram", "hist_equalization", {}),
+        AttackConfig("script_occlusion_50x3", "occlusion", {"block": 50, "num_blocks": 3, "seed": 123}),
+    ]
+    return attacks if include_none else attacks[1:]
+
+
+def grid_attack_suite(include_none: bool = True) -> list[AttackConfig]:
+    """Large parameter-grid attack suite for sensitivity testing."""
+    attacks: list[AttackConfig] = [AttackConfig("no_attack", "none", {})]
+    for q in [100, 95, 90, 80, 70, 60, 50, 40, 30, 20]:
+        attacks.append(AttackConfig(f"grid_jpeg_q{q}", "jpeg", {"quality": q}))
+    for ql in [3.0, 5.0, 7.0, 10.0, 15.0]:
+        attacks.append(AttackConfig(f"grid_jpeg2000_{str(ql).replace('.', 'p')}", "jpeg2000", {"quality_layer": ql}))
+    for sigma in [1.0, 2.0, 5.0, 10.0, 15.0]:
+        attacks.append(AttackConfig(f"grid_gaussian_noise_sigma{str(sigma).replace('.', 'p')}", "gaussian_noise", {"sigma": sigma, "seed": 123}))
+    for amount in [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.10]:
+        attacks.append(AttackConfig(f"grid_salt_pepper_{str(amount).replace('.', 'p')}", "salt_pepper", {"amount": amount, "seed": 123}))
+    for var in [0.0005, 0.001, 0.002, 0.005, 0.01]:
+        attacks.append(AttackConfig(f"grid_speckle_var_{str(var).replace('.', 'p')}", "speckle_noise", {"variance": var, "seed": 123}))
+    for size in [3, 5, 7]:
+        attacks.append(AttackConfig(f"grid_median_{size}x{size}", "median_filter", {"size": size}))
+        attacks.append(AttackConfig(f"grid_average_{size}x{size}", "average_filter", {"size": size}))
+    for radius in [0.5, 1.0, 1.5, 2.0, 3.0]:
+        attacks.append(AttackConfig(f"grid_gaussian_blur_r{str(radius).replace('.', 'p')}", "gaussian_blur", {"radius": radius}))
+    for factor in [0.5, 1.5, 2.0, 3.0]:
+        attacks.append(AttackConfig(f"grid_sharpen_{str(factor).replace('.', 'p')}", "sharpen", {"factor": factor}))
+    attacks.append(AttackConfig("grid_hist_equalization", "hist_equalization", {}))
+    attacks.append(AttackConfig("grid_clahe_like", "clahe_like", {}))
+    for deg in [1, 2, 5, 10, 15, 30, 45]:
+        attacks.append(AttackConfig(f"grid_rotation_{deg}deg", "rotation", {"degrees": float(deg)}))
+    for factor in [0.25, 0.5, 0.75, 1.5, 2.0, 4.0]:
+        attacks.append(AttackConfig(f"grid_resize_{str(factor).replace('.', 'p')}", "resize", {"factor": factor}))
+    for keep in [0.98, 0.95, 0.90, 0.85, 0.80]:
+        attacks.append(AttackConfig(f"grid_crop_resize_{str(keep).replace('.', 'p')}", "crop_resize", {"keep": keep}))
+    for block, num in [(16, 1), (32, 1), (50, 3), (64, 1), (96, 1)]:
+        attacks.append(AttackConfig(f"grid_occlusion_{block}x{num}", "occlusion", {"block": block, "num_blocks": num, "seed": 123}))
+    for gamma in [0.6, 0.8, 1.2, 1.5, 2.0]:
+        attacks.append(AttackConfig(f"grid_gamma_{str(gamma).replace('.', 'p')}", "gamma", {"gamma": gamma}))
+    for factor in [0.7, 0.9, 1.1, 1.3]:
+        attacks.append(AttackConfig(f"grid_brightness_{str(factor).replace('.', 'p')}", "brightness", {"factor": factor}))
+        attacks.append(AttackConfig(f"grid_contrast_{str(factor).replace('.', 'p')}", "contrast", {"factor": factor}))
+    for bits in [7, 6, 5, 4, 3]:
+        attacks.append(AttackConfig(f"grid_bit_depth_{bits}", "bit_depth", {"bits": bits}))
+    for colors in [128, 64, 32, 16]:
+        attacks.append(AttackConfig(f"grid_color_quantization_{colors}", "color_quantization", {"colors": colors}))
+    return attacks if include_none else attacks[1:]
+
 def default_attack_suite(include_none: bool = True, preset: str = "lite") -> list[AttackConfig]:
     preset = str(preset).lower().strip()
     if preset in {"none", "clean", "no_attack"}:
@@ -534,4 +601,8 @@ def default_attack_suite(include_none: bool = True, preset: str = "lite") -> lis
         return full_attack_suite(include_none=include_none)
     if preset in {"stress", "hard", "proposal_stress"}:
         return stress_attack_suite(include_none=include_none)
+    if preset in {"script", "source", "source_script"}:
+        return script_attack_suite(include_none=include_none)
+    if preset in {"grid", "extended", "sweep", "variable"}:
+        return grid_attack_suite(include_none=include_none)
     raise ValueError(f"Unknown attack preset: {preset}")
