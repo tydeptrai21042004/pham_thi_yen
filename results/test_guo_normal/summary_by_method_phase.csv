@@ -1,0 +1,2 @@
+method_id,method_name,phase,psnr_mean,ssim_mean,nc_mean,ncc_mean,ber_mean,psnr_std,nc_min,ber_max,images,rows,embed_time_mean_sec,extract_time_mean_sec
+guo2017_dwt_qr_fa,Guo2017_DWT_QR_FA,before_attack,24.75073593172504,0.9204265822054193,1.0,1.0,0.0,,1.0,0.0,1,1,0.1301658470000575,0.15417517899993527

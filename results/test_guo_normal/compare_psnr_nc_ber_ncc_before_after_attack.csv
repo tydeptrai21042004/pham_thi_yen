@@ -1,0 +1,2 @@
+method_id,method_name,ber_mean_before_attack,nc_mean_before_attack,ncc_mean_before_attack,psnr_mean_before_attack
+guo2017_dwt_qr_fa,Guo2017_DWT_QR_FA,0.0,1.0,1.0,24.75073593172504

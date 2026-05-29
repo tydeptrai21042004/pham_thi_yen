@@ -1,0 +1,2 @@
+method_id,method_name,image,attack,phase,psnr,ssim,nc,ncc,ber,embed_time_sec,extract_time_sec,guo_param_source,guo_lambda_strength,guo_k_mode
+guo2017_dwt_qr_fa,Guo2017_DWT_QR_FA,airplane,no_attack,before_attack,24.75073593172504,0.9204265822054193,1.0,1.0,0.0,0.1301658470000575,0.15417517899993527,optimized:results/test_guo_lambda.json:airplane.bmp,10.71854405748801,paper_integral

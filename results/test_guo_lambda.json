@@ -1,0 +1,104 @@
+{
+  "format": "watermarklab_guo2017_lambda_params_v1",
+  "created_at_utc": "2026-05-29T13:14:13.193348+00:00",
+  "host_dir": "data/host",
+  "watermark_path": "data/watermark/wm.png",
+  "attack_preset": "none",
+  "mode": "original-rerun",
+  "color_mode": "ycbcr_y",
+  "param_names": [
+    "lambda_strength"
+  ],
+  "global_best": {
+    "image": "airplane",
+    "filename": "airplane.bmp",
+    "lambda_strength": 10.71854405748801,
+    "objective": 0.07957341779458071,
+    "clean_ssim": 0.9204265822054193,
+    "mean_attack_ber": 0.0,
+    "fa_params": {
+      "alpha_fa": 0.01,
+      "beta0": 1.0,
+      "gamma": 1.0,
+      "n_fireflies": 2,
+      "n_iterations": 1,
+      "robustness_weight": 30.0,
+      "lambda_min": 0.05,
+      "lambda_max": 20.0,
+      "seed": 2017
+    },
+    "history": [
+      {
+        "iteration": 1,
+        "best_lambda": 10.71854405748801,
+        "best_objective": 0.07957341779458071,
+        "population_min_objective": 0.07957341779458071,
+        "population_mean_objective": 0.08323131223896307,
+        "population_best_lambda": 10.71854405748801
+      }
+    ],
+    "k_mode": "paper_integral"
+  },
+  "per_image": {
+    "airplane": {
+      "image": "airplane",
+      "filename": "airplane.bmp",
+      "lambda_strength": 10.71854405748801,
+      "objective": 0.07957341779458071,
+      "clean_ssim": 0.9204265822054193,
+      "mean_attack_ber": 0.0,
+      "fa_params": {
+        "alpha_fa": 0.01,
+        "beta0": 1.0,
+        "gamma": 1.0,
+        "n_fireflies": 2,
+        "n_iterations": 1,
+        "robustness_weight": 30.0,
+        "lambda_min": 0.05,
+        "lambda_max": 20.0,
+        "seed": 2017
+      },
+      "history": [
+        {
+          "iteration": 1,
+          "best_lambda": 10.71854405748801,
+          "best_objective": 0.07957341779458071,
+          "population_min_objective": 0.07957341779458071,
+          "population_mean_objective": 0.08323131223896307,
+          "population_best_lambda": 10.71854405748801
+        }
+      ],
+      "k_mode": "paper_integral"
+    },
+    "airplane.bmp": {
+      "image": "airplane",
+      "filename": "airplane.bmp",
+      "lambda_strength": 10.71854405748801,
+      "objective": 0.07957341779458071,
+      "clean_ssim": 0.9204265822054193,
+      "mean_attack_ber": 0.0,
+      "fa_params": {
+        "alpha_fa": 0.01,
+        "beta0": 1.0,
+        "gamma": 1.0,
+        "n_fireflies": 2,
+        "n_iterations": 1,
+        "robustness_weight": 30.0,
+        "lambda_min": 0.05,
+        "lambda_max": 20.0,
+        "seed": 2017
+      },
+      "history": [
+        {
+          "iteration": 1,
+          "best_lambda": 10.71854405748801,
+          "best_objective": 0.07957341779458071,
+          "population_min_objective": 0.07957341779458071,
+          "population_mean_objective": 0.08323131223896307,
+          "population_best_lambda": 10.71854405748801
+        }
+      ],
+      "k_mode": "paper_integral"
+    }
+  }
+}

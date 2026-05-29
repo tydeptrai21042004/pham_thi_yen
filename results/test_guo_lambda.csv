@@ -1,0 +1,2 @@
+image,filename,lambda_strength,objective,clean_ssim,mean_attack_ber
+airplane,airplane.bmp,10.71854405748801,0.07957341779458071,0.9204265822054193,0.0

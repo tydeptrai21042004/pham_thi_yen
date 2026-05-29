@@ -14,12 +14,15 @@ from watermarklab.common.io_utils import load_host_rgb, load_watermark_binary, s
 from watermarklab.common.attack import default_attack_suite, apply_attack
 from watermarklab.common.metrics import psnr, ssim, nc, ncc, ber
 from watermarklab.methods import build_methods, BASELINE_METHOD_IDS
+from watermarklab.methods.guo2017_dwt_qr_fa import Guo2017DWTQRFA
 from watermarklab.methods.proposal_qh_dwt_hess import ProposalParams, ProposalQHDWTHess, optimization_param_snapshot
 from watermarklab.paper_reported import write_paper_reported
 
 
 OPT_PARAM_FORMAT = "watermarklab_proposal_optimization_params_v1"
 DEFAULT_PROPOSAL_PARAM_FILE = "results/proposal_optimized_params.json"
+GUO_PARAM_FORMAT = "watermarklab_guo2017_lambda_params_v1"
+DEFAULT_GUO_PARAM_FILE = "results/guo2017_lambda.json"
 
 
 def _safe_num(x):
@@ -134,6 +137,57 @@ def load_proposal_param_file(path: str | Path) -> dict[str, Any]:
     }
 
 
+
+
+def load_guo_param_file(path: str | Path) -> dict[str, Any]:
+    """Load optimized Guo 2017 lambda parameters if present."""
+    path = Path(path)
+    if not path.exists():
+        return {"loaded": False, "path": str(path), "reason": "file_not_found", "per_image": {}, "global_lambda": None}
+
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    per_image: dict[str, float] = {}
+    global_lambda: float | None = None
+
+    if isinstance(raw, dict) and raw.get("format") == GUO_PARAM_FORMAT:
+        gb = raw.get("global_best") or {}
+        if "lambda_strength" in gb:
+            global_lambda = float(gb["lambda_strength"])
+        for key, rec in dict(raw.get("per_image", {})).items():
+            if isinstance(rec, dict) and "lambda_strength" in rec:
+                per_image[str(key)] = float(rec["lambda_strength"])
+                if rec.get("filename"):
+                    per_image[str(rec["filename"])] = float(rec["lambda_strength"])
+    elif isinstance(raw, dict):
+        # Simple manual file support: {"lambda_strength": 4.2}
+        if "lambda_strength" in raw:
+            global_lambda = float(raw["lambda_strength"])
+        elif "lambda" in raw:
+            global_lambda = float(raw["lambda"])
+
+    return {
+        "loaded": bool(global_lambda is not None or per_image),
+        "path": str(path),
+        "per_image": per_image,
+        "global_lambda": global_lambda,
+        "raw_format": raw.get("format") if isinstance(raw, dict) else type(raw).__name__,
+    }
+
+
+def _select_guo_lambda_for_image(host_path: Path, loaded_payload: dict[str, Any] | None) -> tuple[float | None, str]:
+    if not loaded_payload or not loaded_payload.get("loaded"):
+        return None, "default"
+    per_image = dict(loaded_payload.get("per_image", {}))
+    for key in [host_path.name, host_path.stem, str(host_path)]:
+        if key in per_image:
+            return float(per_image[key]), f"optimized:{loaded_payload.get('path')}:{key}"
+    if loaded_payload.get("global_lambda") is not None:
+        return float(loaded_payload["global_lambda"]), f"optimized:{loaded_payload.get('path')}:global"
+    return None, "default"
+
+
 def _select_proposal_params_for_image(host_path: Path, base_params: ProposalParams, loaded_payload: dict[str, Any] | None):
     if not loaded_payload or not loaded_payload.get("loaded"):
         return ProposalParams.from_dict(base_params.to_dict()), "default"
@@ -161,13 +215,16 @@ def run_benchmark(
     attack_preset: str = "lite",
     proposal_options: dict[str, Any] | None = None,
     baseline_modes: dict[str, str] | None = None,
+    guo_options: dict[str, Any] | None = None,
 ):
     host_dir = Path(host_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     baseline_modes = dict(baseline_modes or {})
     proposal_options = dict(proposal_options or {})
+    guo_options = dict(guo_options or {})
     optimized_payload = proposal_options.pop("optimized_payload", None)
+    guo_optimized_payload = guo_options.pop("optimized_payload", None)
 
     if selected_methods == ["baselines"]:
         selected_methods = list(BASELINE_METHOD_IDS)
@@ -182,7 +239,7 @@ def run_benchmark(
         return {"results": pd.DataFrame(), "summary": pd.DataFrame(), "comparison": pd.DataFrame(), "failures": [], "reported_methods": original_report_methods}
 
     runtime_baseline_modes = {m: mode for m, mode in baseline_modes.items() if mode != "original"}
-    methods = build_methods(runtime_selected, proposal_options=proposal_options, baseline_modes=runtime_baseline_modes)
+    methods = build_methods(runtime_selected, proposal_options=proposal_options, baseline_modes=runtime_baseline_modes, guo_options=guo_options)
     host_paths = list_image_files(host_dir)
     if max_images is not None:
         host_paths = host_paths[: int(max_images)]
@@ -200,7 +257,13 @@ def run_benchmark(
             image_name = host_path.stem
             host = load_host_rgb(host_path)
             param_source = "not_proposal"
+            guo_param_source = "not_guo"
             try:
+                if method_id == "guo2017_dwt_qr_fa" and isinstance(method, Guo2017DWTQRFA):
+                    selected_lambda, guo_param_source = _select_guo_lambda_for_image(host_path, guo_optimized_payload)
+                    if selected_lambda is not None:
+                        method.lambda_strength = float(selected_lambda)
+
                 if method_id == "proposal" and isinstance(method, ProposalQHDWTHess):
                     selected_params, param_source = _select_proposal_params_for_image(host_path, method.params, optimized_payload)
                     method.params = selected_params
@@ -216,6 +279,10 @@ def run_benchmark(
                 extract_clean_time = time.perf_counter() - t1
 
                 key_info = {"proposal_param_source": param_source} if method_id == "proposal" else {}
+                if method_id == "guo2017_dwt_qr_fa" and isinstance(method, Guo2017DWTQRFA):
+                    key_info["guo_param_source"] = guo_param_source
+                    key_info["guo_lambda_strength"] = float(method.lambda_strength)
+                    key_info["guo_k_mode"] = str(method.k_mode)
                 if hasattr(key, "repeat_factor"):
                     key_info["proposal_repeat_factor"] = getattr(key, "repeat_factor")
                     key_info["proposal_usable_blocks"] = getattr(key, "usable_blocks")
@@ -441,6 +508,123 @@ def run_proposal_optimization_phase(
     return payload
 
 
+
+
+def run_guo_optimization_phase(
+    host_dir: str | Path,
+    watermark_path: str | Path,
+    output_file: str | Path,
+    *,
+    max_images: int | None = None,
+    invert_watermark: bool = False,
+    mode: str = "original-rerun",
+    color_mode: str = "ycbcr_y",
+    attack_preset: str = "full",
+    n_fireflies: int = 10,
+    n_iterations: int = 10,
+    alpha_fa: float = 0.01,
+    beta0: float = 1.0,
+    gamma: float = 1.0,
+    robustness_weight: float = 30.0,
+    lambda_min: float = 0.05,
+    lambda_max: float = 20.0,
+    seed: int = 2017,
+) -> dict[str, Any]:
+    """Run Guo et al. 2017 Firefly search for the embedding strength lambda."""
+    host_dir = Path(host_dir)
+    output_file = Path(output_file)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    host_paths = list_image_files(host_dir)
+    if max_images is not None:
+        host_paths = host_paths[: int(max_images)]
+    if not host_paths:
+        raise ValueError(f"No host images found in {host_dir}")
+
+    watermark = load_watermark_binary(watermark_path, invert=invert_watermark)
+    attack_suite = default_attack_suite(include_none=False, preset=attack_preset)
+
+    per_image: dict[str, Any] = {}
+    rows: list[dict[str, Any]] = []
+    global_best: dict[str, Any] | None = None
+    global_best_obj = float("inf")
+
+    for idx, host_path in enumerate(host_paths):
+        host = load_host_rgb(host_path)
+        method = Guo2017DWTQRFA(
+            mode=mode,
+            color_mode=color_mode,
+            seed=seed,
+            k_mode="paper_integral",
+        )
+        result = method.optimize_lambda_firefly(
+            host,
+            watermark,
+            attack_suite,
+            n_fireflies=n_fireflies,
+            n_iterations=n_iterations,
+            alpha_fa=alpha_fa,
+            beta0=beta0,
+            gamma=gamma,
+            robustness_weight=robustness_weight,
+            lambda_min=lambda_min,
+            lambda_max=lambda_max,
+            seed=seed + idx * 100000,
+        )
+        entry = {
+            "image": host_path.stem,
+            "filename": host_path.name,
+            "lambda_strength": float(result.lambda_strength),
+            "objective": float(result.objective),
+            "clean_ssim": float(result.clean_ssim),
+            "mean_attack_ber": float(result.mean_attack_ber),
+            "fa_params": result.fa_params,
+            "history": result.history,
+            "k_mode": "paper_integral",
+        }
+        per_image[host_path.stem] = entry
+        per_image[host_path.name] = entry
+        if result.objective < global_best_obj:
+            global_best_obj = float(result.objective)
+            global_best = dict(entry)
+
+        rows.append({
+            "image": host_path.stem,
+            "filename": host_path.name,
+            "lambda_strength": float(result.lambda_strength),
+            "objective": float(result.objective),
+            "clean_ssim": float(result.clean_ssim),
+            "mean_attack_ber": float(result.mean_attack_ber),
+        })
+        print(f"[GUO-OPT] {host_path.name}: lambda={result.lambda_strength:.6f}, objective={result.objective:.6f}, clean_ssim={result.clean_ssim:.6f}, mean_attack_ber={result.mean_attack_ber:.6f}")
+
+    payload = {
+        "format": GUO_PARAM_FORMAT,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "host_dir": str(host_dir),
+        "watermark_path": str(watermark_path),
+        "attack_preset": str(attack_preset),
+        "mode": str(mode),
+        "color_mode": str(color_mode),
+        "param_names": ["lambda_strength"],
+        "global_best": global_best,
+        "per_image": per_image,
+    }
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False, default=_json_default)
+
+    csv_path = output_file.with_suffix(".csv")
+    if rows:
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+
+    print(f"Saved optimized Guo lambda parameters to: {output_file}")
+    print(f"Saved optimized Guo lambda CSV to: {csv_path}")
+    return payload
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run the cleaned watermarking benchmark on 512x512 RGB host images and a 64x64 binary watermark.")
     parser.add_argument("--phase", default="normal", choices=["normal", "optimize", "optimization"], help="normal: run benchmark; optimize: search proposal parameters and export them.")
@@ -457,6 +641,19 @@ def main():
     parser.add_argument("--guo-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"])
     parser.add_argument("--gaata-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"])
     parser.add_argument("--dwt-hd-svd-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"])
+
+    parser.add_argument("--guo-param-file", default=DEFAULT_GUO_PARAM_FILE, help="JSON file written by Guo Firefly optimization phase. Normal phase loads it automatically when it exists.")
+    parser.add_argument("--guo-param-mode", default="auto", choices=["auto", "ignore", "require"], help="auto: use Guo lambda file if present; ignore: fixed/default lambda; require: fail if missing.")
+    parser.add_argument("--guo-optimizer-fireflies", type=int, default=10)
+    parser.add_argument("--guo-optimizer-generations", type=int, default=10)
+    parser.add_argument("--guo-optimizer-attack-preset", default="full", choices=["none", "lite", "full", "stress", "script", "requested", "grid"], help="Attack preset used while optimizing Guo lambda.")
+    parser.add_argument("--guo-optimizer-alpha", type=float, default=0.01, help="FA randomization alpha, paper default 0.01.")
+    parser.add_argument("--guo-optimizer-beta0", type=float, default=1.0, help="FA beta0, paper default 1.")
+    parser.add_argument("--guo-optimizer-gamma", type=float, default=1.0, help="FA gamma, paper default 1.")
+    parser.add_argument("--guo-optimizer-weight", type=float, default=30.0, help="BER weight in [1-SSIM] + weight*mean(BER), paper default 30.")
+    parser.add_argument("--guo-lambda-min", type=float, default=0.05)
+    parser.add_argument("--guo-lambda-max", type=float, default=20.0)
+    parser.add_argument("--guo-optimizer-seed", type=int, default=2017)
 
     parser.add_argument("--proposal-param-file", default=DEFAULT_PROPOSAL_PARAM_FILE, help="JSON/CSV file written by optimization phase. Normal phase loads it automatically when it exists.")
     parser.add_argument("--proposal-param-mode", default="auto", choices=["auto", "ignore", "require"], help="auto: use param file if present; ignore: always defaults; require: fail if missing.")
@@ -475,8 +672,36 @@ def main():
     args = parser.parse_args()
     fireflies = int(args.proposal_optimizer_fireflies if args.proposal_optimizer_fireflies is not None else args.proposal_optimizer_trials)
     repeat_value = _parse_repeat(args.proposal_repeat)
+    selected = [s.strip() for s in args.methods.split(",") if s.strip()]
+    if selected == ["all"]:
+        selected_normalized = None
+    else:
+        selected_normalized = selected
 
     if args.phase in {"optimize", "optimization"}:
+        # Guo 2017 has its own Firefly phase for lambda. If the user selects
+        # Guo only, optimize Guo; otherwise keep the existing proposal optimizer.
+        if selected_normalized == ["guo2017_dwt_qr_fa"]:
+            run_guo_optimization_phase(
+                host_dir=args.host_dir,
+                watermark_path=args.watermark,
+                output_file=args.guo_param_file,
+                max_images=args.max_images,
+                invert_watermark=args.invert_watermark,
+                mode=_mode(args.guo_mode) if "_mode" in locals() else (args.baseline_mode if args.guo_mode == "inherit" else args.guo_mode),
+                attack_preset=args.guo_optimizer_attack_preset,
+                n_fireflies=int(args.guo_optimizer_fireflies),
+                n_iterations=int(args.guo_optimizer_generations),
+                alpha_fa=float(args.guo_optimizer_alpha),
+                beta0=float(args.guo_optimizer_beta0),
+                gamma=float(args.guo_optimizer_gamma),
+                robustness_weight=float(args.guo_optimizer_weight),
+                lambda_min=float(args.guo_lambda_min),
+                lambda_max=float(args.guo_lambda_max),
+                seed=int(args.guo_optimizer_seed),
+            )
+            return
+
         run_proposal_optimization_phase(
             host_dir=args.host_dir,
             watermark_path=args.watermark,
@@ -495,9 +720,7 @@ def main():
         )
         return
 
-    selected = [s.strip() for s in args.methods.split(",") if s.strip()]
-    if selected == ["all"]:
-        selected = None
+    selected = selected_normalized
 
     def _mode(value: str) -> str:
         return args.baseline_mode if value == "inherit" else value
@@ -508,6 +731,16 @@ def main():
         "gaata2022_dwt_hess_fwa": _mode(args.gaata_mode),
         "dwt_hd_svd_2025": _mode(args.dwt_hd_svd_mode),
     }
+
+    guo_optimized_payload = None
+    if args.guo_param_mode != "ignore":
+        guo_optimized_payload = load_guo_param_file(args.guo_param_file)
+        if args.guo_param_mode == "require" and not guo_optimized_payload.get("loaded"):
+            raise FileNotFoundError(f"Required Guo lambda file was not loaded: {args.guo_param_file}")
+        if guo_optimized_payload.get("loaded"):
+            print(f"[NORMAL] Loaded optimized Guo lambda from: {args.guo_param_file}")
+        else:
+            print(f"[NORMAL] No optimized Guo lambda file found; using default Guo lambda. Checked: {args.guo_param_file}")
 
     optimized_payload = None
     if args.proposal_param_mode != "ignore":
@@ -525,6 +758,10 @@ def main():
         "params": {"repeat": repeat_value, "dwt_mode": "pywt"},
         "optimized_payload": optimized_payload,
     }
+    guo_options = {
+        "k_mode": "paper_integral",
+        "optimized_payload": guo_optimized_payload,
+    }
 
     result = run_benchmark(
         host_dir=args.host_dir,
@@ -537,6 +774,7 @@ def main():
         attack_preset=args.attack_preset,
         proposal_options=proposal_options,
         baseline_modes=baseline_modes,
+        guo_options=guo_options,
     )
     if not result["results"].empty:
         print(f"Saved per-image results to: {Path(args.output) / 'per_image_attack_results.csv'}")
