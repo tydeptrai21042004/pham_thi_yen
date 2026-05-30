@@ -300,8 +300,15 @@ def run_benchmark(
 
                 if save_outputs:
                     base = output_dir / "images" / method_id / image_name
-                    save_image(base / "watermarked.png", watermarked)
-                    save_image(base / "extracted_no_attack.png", extracted_clean)
+
+                    # Clean/original host image before embedding.
+                    save_image(base / "host_original.png", host)
+
+                    # Watermarked host image before any attack.
+                    save_image(base / "host_before_attack_watermarked.png", watermarked)
+
+                    # Watermark extracted from the watermarked image before any attack.
+                    save_image(base / "watermark_extracted_before_attack.png", extracted_clean)
 
                 rows.append({
                     "method_id": method_id,
@@ -328,10 +335,13 @@ def run_benchmark(
                         extracted = method.extract(attacked, key, host_rgb=host)
                         extract_time = time.perf_counter() - t2
                         if save_outputs:
-                            base = output_dir / "images" / method_id / image_name
-                            if attack.name in {"jpeg_q70", "jpeg_q90", "gaussian_noise_sigma5", "rotation_2deg", "script_rotation_45deg"}:
-                                save_image(base / f"attacked_{attack.name}.png", attacked)
-                                save_image(base / f"extracted_{attack.name}.png", extracted)
+                            attack_base = output_dir / "images" / method_id / image_name / "attacks" / attack.name
+
+                            # Watermarked host image after this attack.
+                            save_image(attack_base / "host_after_attack.png", attacked)
+
+                            # Watermark extracted after this attack.
+                            save_image(attack_base / "watermark_extracted_after_attack.png", extracted)
                         rows.append({
                             "method_id": method_id,
                             "method_name": method.name,
