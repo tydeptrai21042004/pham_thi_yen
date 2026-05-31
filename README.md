@@ -7,7 +7,8 @@ This is the cleaned version of your watermarking project. It keeps only:
 3. **Paper 3 — Gaata 2022**: DWT + Hessenberg + Firework Algorithm.
 4. **Paper 4 — DWT-HD-SVD 2024/2025**: DWT + HD/Hessenberg + SVD + logistic chaos.
 5. **Paper 5 — Hess-Nha 2023**: blind Hessenberg H(2,2) quantization, adapted to a 64x64 binary watermark.
-6. **Your proposal method**.
+6. **Paper 6 — Roy 2018**: YCbCr-Y blockwise DWT-SVD side-information baseline.
+7. **Your proposal method**.
 
 Older unrelated baselines have been removed.
 
@@ -67,7 +68,7 @@ OPENBLAS_NUM_THREADS=1 PYTHONPATH=src pytest -q
 
 ---
 
-## Run only the four baselines
+## Run only the baselines
 
 Clean/no-attack quick check:
 
@@ -130,6 +131,7 @@ guo2017_dwt_qr_fa
 gaata2022_dwt_hess_fwa
 dwt_hd_svd_2025
 hess_nha2023
+roy2018_dwt_svd
 proposal
 baselines
 all
@@ -159,6 +161,26 @@ The requested attack preset also includes:
 ```text
 occlusion_25pct
 occlusion_50pct
+```
+
+## Roy2018 DWT-SVD baseline
+
+The new baseline ID is:
+
+```text
+roy2018_dwt_svd
+```
+
+It follows Roy and Pal 2018: RGB host images are converted to YCbCr, the Y channel is split into `32x32` blocks, each block is transformed by three-level Haar DWT, and each `4x4` watermark block is embedded in the singular-value matrix with `alpha=0.02`. Extraction uses side information from the embedding phase (`Sp`, `UWp`, `VWp`), so this is not a fully blind method.
+
+Run only Roy2018:
+
+```bash
+OPENBLAS_NUM_THREADS=1 PYTHONPATH=src python main.py \
+  --methods roy2018_dwt_svd \
+  --attack-preset none \
+  --max-images 1 \
+  --output results/roy2018_clean_smoke
 ```
 
 ## Output files

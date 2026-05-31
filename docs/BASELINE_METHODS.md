@@ -11,9 +11,10 @@ This project keeps the requested paper baselines plus the proposal method.
 | `gaata2022_dwt_hess_fwa` | Gaata et al. 2022, DWT-Hessenberg with Firework Algorithm | `src/watermarklab/methods/gaata2022_dwt_hess_fwa.py` |
 | `dwt_hd_svd_2025` | Dong et al. 2024/2025, DWT-HD-SVD with logistic chaos | `src/watermarklab/methods/dwt_hd_svd2025.py` |
 | `hess_nha2023` | Nha et al. 2023, blind Hessenberg H(2,2) quantization, adapted to 64x64 watermark | `src/watermarklab/methods/hess_nha2023.py` |
+| `roy2018_dwt_svd` | Roy & Pal 2018, YCbCr-Y blockwise 3-level DWT-SVD side-information baseline | `src/watermarklab/methods/roy2018_dwt_svd.py` |
 | `proposal` | Your proposed Q/H DWT-Hessenberg method | `src/watermarklab/methods/proposal_qh_dwt_hess.py` |
 
-Removed from the old project: `roy2018`, `iwt_hess_svd_2024`, `mahto2022_firefly_dual`, old smoke-result folders, old refactor changelogs, and obsolete tests.
+Removed from the old project: the obsolete old `roy2018` implementation, `iwt_hess_svd_2024`, `mahto2022_firefly_dual`, old smoke-result folders, old refactor changelogs, and obsolete tests.
 
 ## Why reproduced results may differ from the paper
 
@@ -36,3 +37,8 @@ Do not mix these in one table without labels:
 - **Paper-guided reproduction**: this implementation following the paper algorithm.
 - **Unified benchmark**: same host set, watermark, metrics, and attacks for all methods.
 - **Proposal result**: your method under the same benchmark.
+
+
+## Roy 2018 DWT-SVD side-information baseline
+
+Method id: `roy2018_dwt_svd`. This baseline follows Roy and Pal's YCbCr-Y blockwise DWT-SVD procedure: 512x512 RGB host images are converted to YCbCr, the Y channel is divided into 32x32 blocks, a three-level Haar DWT is applied to each block, and 4x4 watermark blocks are embedded into the singular-value matrix with `alpha=0.02`. Extraction stores and reuses `Sp`, `UWp`, and `VWp` from the embedding phase, so the method is a side-information baseline rather than a fully blind method.

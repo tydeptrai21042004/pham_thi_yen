@@ -641,7 +641,7 @@ def main():
     parser.add_argument("--host-dir", default="data/host")
     parser.add_argument("--watermark", default="data/watermark/wm.png")
     parser.add_argument("--output", default="results/common_benchmark")
-    parser.add_argument("--methods", default="all", help="Comma-separated: all,baselines,kumar2021,guo2017_dwt_qr_fa,gaata2022_dwt_hess_fwa,dwt_hd_svd_2025,hess_nha2023,proposal")
+    parser.add_argument("--methods", default="all", help="Comma-separated: all,baselines,kumar2021,guo2017_dwt_qr_fa,gaata2022_dwt_hess_fwa,dwt_hd_svd_2025,hess_nha2023,roy2018_dwt_svd,proposal")
     parser.add_argument("--max-images", type=int, default=None, help="Optional quick-run limit.")
     parser.add_argument("--no-save-images", action="store_true")
     parser.add_argument("--invert-watermark", action="store_true")
@@ -652,6 +652,7 @@ def main():
     parser.add_argument("--gaata-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"])
     parser.add_argument("--dwt-hd-svd-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"])
     parser.add_argument("--hess-nha-mode", default="inherit", choices=["inherit", "adapt", "paper", "original", "original-rerun"], help="Hess-Nha2023 mode: adapt uses T=15 for 64x64; paper/original-rerun uses T=65 with 64x64 tiling.")
+    parser.add_argument("--roy-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"], help="Roy2018 mode: adapt/original-rerun run the local DWT-SVD baseline; original writes paper-reported rows.")
 
     parser.add_argument("--guo-param-file", default=DEFAULT_GUO_PARAM_FILE, help="JSON file written by Guo Firefly optimization phase. Normal phase loads it automatically when it exists.")
     parser.add_argument("--guo-param-mode", default="auto", choices=["auto", "ignore", "require"], help="auto: use Guo lambda file if present; ignore: fixed/default lambda; require: fail if missing.")
@@ -742,6 +743,7 @@ def main():
         "gaata2022_dwt_hess_fwa": _mode(args.gaata_mode),
         "dwt_hd_svd_2025": _mode(args.dwt_hd_svd_mode),
         "hess_nha2023": _mode(args.hess_nha_mode),
+        "roy2018_dwt_svd": _mode(args.roy_mode),
     }
 
     guo_optimized_payload = None

@@ -3,7 +3,7 @@ from typing import Any
 from pathlib import Path
 import pandas as pd
 
-BASELINE_IDS = {"kumar2021", "guo2017_dwt_qr_fa", "gaata2022_dwt_hess_fwa", "dwt_hd_svd_2025", "hess_nha2023"}
+BASELINE_IDS = {"kumar2021", "guo2017_dwt_qr_fa", "gaata2022_dwt_hess_fwa", "dwt_hd_svd_2025", "hess_nha2023", "roy2018_dwt_svd"}
 
 def _r(method_id: str, paper: str, table: str, phase: str, image: str, attack: str, metric: str, value: Any, unit: str = "", note: str = ""):
     return {"method_id": method_id, "paper": paper, "table": table, "mode": "original_reported", "phase": phase, "image": image, "attack": attack, "metric": metric, "value": value, "unit": unit, "note": note}
@@ -85,6 +85,26 @@ def paper_reported_rows(method_ids: list[str] | None = None) -> list[dict[str, A
             _r("hess_nha2023", p, "Section 4.3 statement", "before_attack", "Average", "no_attack", "NC_watermark", 1.0, note="Paper states NC is 1 under no attack."),
             _r("hess_nha2023", p, "Abstract statement", "after_attack", "Average", "common_attacks", "NC_watermark", 0.93, note="Paper states average NC is higher than 0.93 under common attacks; this is a lower-bound statement, not an exact mean."),
             _r("hess_nha2023", p, "Section 4.2", "metadata", "All", "payload", "watermark_side", 32, "px", note="Original paper watermarks are 32x32 binary; project implementation adapts to 64x64."),
+        ]
+
+    if "roy2018_dwt_svd" in ids:
+        p = "Roy and Pal 2018"
+        rows += [
+            _r("roy2018_dwt_svd", p, "Table 1", "before_attack", "Lena", "no_attack", "PSNR", 51.1464, "dB"),
+            _r("roy2018_dwt_svd", p, "Table 1", "before_attack", "Lena", "no_attack", "NC_watermark", 0.9992),
+            _r("roy2018_dwt_svd", p, "Table 1", "before_attack", "Lena", "no_attack", "BER", 0.006),
+            _r("roy2018_dwt_svd", p, "Table 1", "before_attack", "Peppers", "no_attack", "PSNR", 51.1286, "dB"),
+            _r("roy2018_dwt_svd", p, "Table 1", "before_attack", "Peppers", "no_attack", "NC_watermark", 0.9989),
+            _r("roy2018_dwt_svd", p, "Table 1", "before_attack", "Peppers", "no_attack", "BER", 0.007),
+            _r("roy2018_dwt_svd", p, "Table 1", "before_attack", "Mandril", "no_attack", "PSNR", 51.1269, "dB"),
+            _r("roy2018_dwt_svd", p, "Table 1", "before_attack", "Mandril", "no_attack", "NC_watermark", 0.9987),
+            _r("roy2018_dwt_svd", p, "Table 1", "before_attack", "Mandril", "no_attack", "BER", 0.007),
+            _r("roy2018_dwt_svd", p, "Table 1", "before_attack", "Agni-III missile", "no_attack", "PSNR", 51.1925, "dB"),
+            _r("roy2018_dwt_svd", p, "Table 1", "before_attack", "Agni-III missile", "no_attack", "NC_watermark", 0.9979),
+            _r("roy2018_dwt_svd", p, "Table 1", "before_attack", "Agni-III missile", "no_attack", "BER", 0.008),
+            _r("roy2018_dwt_svd", p, "Section 4", "metadata", "All", "watermark", "watermark_size", "64x64"),
+            _r("roy2018_dwt_svd", p, "Section 4", "metadata", "All", "embedding_strength", "alpha", 0.02),
+            _r("roy2018_dwt_svd", p, "Equations 5-16", "metadata", "All", "side_information", "side_information", "Sp,UWp,VWp", note="Stored from embedding phase for extraction; not a fully blind method."),
         ]
     if "dwt_hd_svd_2025" in ids:
         p = "Dong, Yan and Yin 2024"
