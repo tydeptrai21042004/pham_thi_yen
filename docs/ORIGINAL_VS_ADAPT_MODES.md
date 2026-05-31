@@ -36,4 +36,8 @@ Available override flags:
 --guo-mode
 --gaata-mode
 --dwt-hd-svd-mode
+--hess-nha-mode
 ```
+
+
+For `hess_nha2023`, `adapt` uses the uploaded notebook setting `T=15` for the 64x64 watermark. The `paper` / `original-rerun` mode uses `T=65`, but it is still a 64x64 adapter because the original paper reports 32x32 binary watermarks.

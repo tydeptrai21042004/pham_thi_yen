@@ -12,28 +12,29 @@ from watermarklab.common.embedding_math import (
 
 
 # =========================================================
-# Paper-aligned Logistic chaotic mapping for DWT-HD-SVD 2025
+# DWT-HD-SVD 2025 Logistic chaotic mapping
 # =========================================================
-# The paper states x0 = 0.5 and mu = 4, and describes Logistic chaotic
-# mapping + XOR encryption. The previous ZIP implementation used
-# x0 = 0.517, mu = 3.999999, burn_in = 128, plus permutation + XOR.
-# This file keeps the user's 64x64 input setting, but corrects only the
-# two requested paper mismatches:
-#   1) use paper Logistic parameters and XOR-only encryption;
-#   2) apply singular-value correction beta = 0.95 in extraction.
+# The paper reports x0 = 0.5 and mu = 4 for Logistic encryption.
+# In exact arithmetic, x0 = 0.5, mu = 4 gives the degenerate orbit
+# 0.5 -> 1 -> 0 -> 0 -> ..., so it is not a useful chaotic key stream.
+# This corrected implementation keeps mu = 4 and XOR-only encryption, but
+# uses a deterministic non-degenerate seed near the reported x0 so the mask is
+# non-constant and encryption/decryption remain reproducible.
 
-PAPER_LOGISTIC_X0 = 0.5
+PAPER_REPORTED_LOGISTIC_X0 = 0.5
+PAPER_LOGISTIC_X0 = 0.517
 PAPER_LOGISTIC_MU = 4.0
 PAPER_BETA = 0.95
 WM_THRESHOLD = 127
 
 
 def _paper_logistic_sequence(n: int, x0: float = PAPER_LOGISTIC_X0, mu: float = PAPER_LOGISTIC_MU) -> np.ndarray:
-    """Generate the Logistic sequence used by the paper-style encryptor.
+    """Generate a deterministic non-degenerate Logistic key stream.
 
-    No burn-in and no permutation are used here because the paper describes
-    Logistic chaotic mapping as the key stream for XOR encryption, not a
-    permutation-plus-mask scheme.
+    No burn-in and no permutation are used because the paper describes
+    Logistic chaotic mapping as an XOR key stream, not a permutation-plus-mask
+    scheme.  A tiny guard is applied only if a caller explicitly passes a
+    degenerate seed such as exactly 0, 0.5, or 1.
     """
     n = int(n)
     if n < 0:
@@ -41,16 +42,29 @@ def _paper_logistic_sequence(n: int, x0: float = PAPER_LOGISTIC_X0, mu: float = 
 
     x = float(x0)
     mu = float(mu)
+
+    if not (0.0 < x < 1.0):
+        raise ValueError("Logistic x0 must be in (0, 1)")
+    if not (3.5699456 < mu <= 4.0):
+        raise ValueError("Logistic mu should be in the chaotic range (3.5699456, 4]")
+
+    # Avoid fixed/degenerate binary-orbit seeds.  This keeps explicit calls with
+    # x0=0.5 from producing the constant 255,0,0,... mask.
+    if x in (0.5,):
+        x = PAPER_LOGISTIC_X0
+
     seq = np.empty(n, dtype=np.float64)
+    eps = np.finfo(np.float64).eps
 
     for i in range(n):
         x = mu * x * (1.0 - x)
 
-        # Numerical guard.
-        if x < 0.0:
-            x = 0.0
-        elif x > 1.0:
-            x = 1.0
+        # Keep the state inside the open interval so the sequence cannot become
+        # exactly 0 or 1 after finite-precision rounding.
+        if x <= 0.0:
+            x = eps
+        elif x >= 1.0:
+            x = 1.0 - eps
 
         seq[i] = x
 
@@ -170,8 +184,9 @@ class DWTHDSVD2025:
         # embed into same-sized top-left LL ROI.
         roi = ll[:expected_shape[0], :expected_shape[1]].copy()
 
-        # Corrected paper-style Logistic XOR encryption:
-        # x0 = 0.5, mu = 4, no burn-in, no permutation.
+        # Corrected Logistic XOR encryption:
+        # reported x0=0.5 is degenerate, so the default uses x0=0.517,
+        # mu=4, no burn-in, and no permutation.
         wm_enc, mask = _paper_logistic_xor_encrypt_uint8(
             wm,
             x0=self.logistic_x0,

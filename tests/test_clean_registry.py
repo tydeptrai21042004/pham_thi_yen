@@ -7,6 +7,7 @@ def test_clean_method_registry_contains_only_requested_methods():
         "guo2017_dwt_qr_fa",
         "gaata2022_dwt_hess_fwa",
         "dwt_hd_svd_2025",
+        "hess_nha2023",
     ]
     assert DEFAULT_METHOD_IDS == BASELINE_METHOD_IDS + ["proposal"]
     assert list(build_methods(["baselines"]).keys()) == BASELINE_METHOD_IDS

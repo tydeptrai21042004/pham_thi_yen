@@ -227,6 +227,46 @@ def occlusion(image: Array, block: int = 64, seed: int = 123, value: int = 0, nu
     return out
 
 
+def occlusion_fraction(
+    image: Array,
+    fraction: float = 0.25,
+    seed: int = 123,
+    value: int = 0,
+    position: str = "center",
+    **kwargs,
+) -> Array:
+    """Occlude an approximate fraction of the image with one solid rectangle.
+
+    ``fraction=0.25`` masks about 25% of the image area; ``fraction=0.50``
+    masks about 50%.  The rectangle keeps the input aspect ratio when possible
+    and the output image size is unchanged.
+    """
+    out = _u8(image).copy()
+    h, w = out.shape[:2]
+    frac = float(np.clip(float(fraction), 0.0, 1.0))
+    if frac <= 0.0:
+        return out
+    if frac >= 1.0:
+        out[:, :] = int(np.clip(int(value), 0, 255))
+        return out
+
+    # Area-based square/aspect-preserving occlusion. For 512x512, 25% becomes
+    # 256x256; 50% becomes approximately 362x362.
+    scale = math.sqrt(frac)
+    rect_h = int(np.clip(round(h * scale), 1, h))
+    rect_w = int(np.clip(round(w * scale), 1, w))
+
+    if str(position).lower().strip() in {"random", "rand"}:
+        rng = np.random.default_rng(int(seed))
+        y0 = int(rng.integers(0, h - rect_h + 1))
+        x0 = int(rng.integers(0, w - rect_w + 1))
+    else:
+        y0 = (h - rect_h) // 2
+        x0 = (w - rect_w) // 2
+    out[y0 : y0 + rect_h, x0 : x0 + rect_w] = int(np.clip(int(value), 0, 255))
+    return out
+
+
 def gamma_correction(image: Array, gamma: float = 1.2, **kwargs) -> Array:
     img = _u8(image).astype(np.float64) / 255.0
     return _u8(np.power(img, float(gamma)) * 255.0)
@@ -404,6 +444,7 @@ _ATTACK_FUNCS: dict[str, Callable[..., Array]] = {
     "resize": resize_attack,
     "crop_resize": crop_resize,
     "occlusion": occlusion,
+    "occlusion_fraction": occlusion_fraction,
     "gamma": gamma_correction,
     "brightness": brightness,
     "contrast": contrast,
@@ -503,6 +544,8 @@ def full_attack_suite(include_none: bool = True) -> list[AttackConfig]:
         AttackConfig("occlusion_32", "occlusion", {"block": 32, "num_blocks": 1, "seed": 123}),
         AttackConfig("occlusion_64", "occlusion", {"block": 64, "num_blocks": 1, "seed": 123}),
         AttackConfig("occlusion_50x3", "occlusion", {"block": 50, "num_blocks": 3, "seed": 123}),
+        AttackConfig("occlusion_25pct", "occlusion_fraction", {"fraction": 0.25, "position": "center", "value": 0}),
+        AttackConfig("occlusion_50pct", "occlusion_fraction", {"fraction": 0.50, "position": "center", "value": 0}),
         # Photometric and quantization
         AttackConfig("gamma_0p8", "gamma", {"gamma": 0.8}),
         AttackConfig("gamma_1p2", "gamma", {"gamma": 1.2}),
@@ -582,6 +625,8 @@ def script_attack_suite(include_none: bool = True) -> list[AttackConfig]:
         AttackConfig("script_rotation_45deg", "rotation", {"degrees": 45.0}),
         AttackConfig("script_histogram", "hist_equalization", {}),
         AttackConfig("script_occlusion_50x3", "occlusion", {"block": 50, "num_blocks": 3, "seed": 123}),
+        AttackConfig("script_occlusion_25pct", "occlusion_fraction", {"fraction": 0.25, "position": "center", "value": 0}),
+        AttackConfig("script_occlusion_50pct", "occlusion_fraction", {"fraction": 0.50, "position": "center", "value": 0}),
     ]
     return attacks if include_none else attacks[1:]
 
@@ -619,6 +664,8 @@ def requested_attack_suite(include_none: bool = True) -> list[AttackConfig]:
         AttackConfig("crop_95", "crop_resize", {"keep": 0.95}),
         AttackConfig("crop_90", "crop_resize", {"keep": 0.90}),
         AttackConfig("crop_75", "crop_resize", {"keep": 0.75}),
+        AttackConfig("occlusion_25pct", "occlusion_fraction", {"fraction": 0.25, "position": "center", "value": 0}),
+        AttackConfig("occlusion_50pct", "occlusion_fraction", {"fraction": 0.50, "position": "center", "value": 0}),
         AttackConfig("gamma_0p75", "gamma", {"gamma": 0.75}),
         AttackConfig("gamma_1p0", "gamma", {"gamma": 1.0}),
         AttackConfig("gamma_1p2", "gamma", {"gamma": 1.2}),
@@ -684,6 +731,8 @@ def grid_attack_suite(include_none: bool = True) -> list[AttackConfig]:
         attacks.append(AttackConfig(f"grid_crop_resize_{str(keep).replace('.', 'p')}", "crop_resize", {"keep": keep}))
     for block, num in [(16, 1), (32, 1), (50, 3), (64, 1), (96, 1)]:
         attacks.append(AttackConfig(f"grid_occlusion_{block}x{num}", "occlusion", {"block": block, "num_blocks": num, "seed": 123}))
+    for frac in [0.25, 0.50]:
+        attacks.append(AttackConfig(f"grid_occlusion_{int(frac*100)}pct", "occlusion_fraction", {"fraction": frac, "position": "center", "value": 0}))
     for gamma in [0.6, 0.8, 1.2, 1.5, 2.0]:
         attacks.append(AttackConfig(f"grid_gamma_{str(gamma).replace('.', 'p')}", "gamma", {"gamma": gamma}))
     for factor in [0.7, 0.9, 1.1, 1.3]:

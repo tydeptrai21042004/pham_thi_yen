@@ -3,7 +3,7 @@ from typing import Any
 from pathlib import Path
 import pandas as pd
 
-BASELINE_IDS = {"kumar2021", "guo2017_dwt_qr_fa", "gaata2022_dwt_hess_fwa", "dwt_hd_svd_2025"}
+BASELINE_IDS = {"kumar2021", "guo2017_dwt_qr_fa", "gaata2022_dwt_hess_fwa", "dwt_hd_svd_2025", "hess_nha2023"}
 
 def _r(method_id: str, paper: str, table: str, phase: str, image: str, attack: str, metric: str, value: Any, unit: str = "", note: str = ""):
     return {"method_id": method_id, "paper": paper, "table": table, "mode": "original_reported", "phase": phase, "image": image, "attack": attack, "metric": metric, "value": value, "unit": unit, "note": note}
@@ -77,6 +77,15 @@ def paper_reported_rows(method_ids: list[str] | None = None) -> list[dict[str, A
         ]
         for attack, val in {"jpg_compression":98.12,"scaling":99.005,"rotation":97.62,"gaussian_noise":95.245,"histogram_equalization":94.845,"image_adjustment":93.953}.items():
             rows.append(_r("gaata2022_dwt_hess_fwa", p, "Table 4 FWA mean", "after_attack", "Average", attack, "retrieval_percent_FWA", val, "%"))
+    if "hess_nha2023" in ids:
+        p = "Nha et al. 2023"
+        rows += [
+            _r("hess_nha2023", p, "Section 4.3 statement", "before_attack", "Average", "no_attack", "PSNR", 54.0, "dB", note="Paper states average PSNR is higher than 54 dB; exact per-image table can be added if needed."),
+            _r("hess_nha2023", p, "Section 4.3 statement", "before_attack", "Average", "no_attack", "SSIM", 0.9991, note="Paper states average SSIM is higher than 0.9991."),
+            _r("hess_nha2023", p, "Section 4.3 statement", "before_attack", "Average", "no_attack", "NC_watermark", 1.0, note="Paper states NC is 1 under no attack."),
+            _r("hess_nha2023", p, "Abstract statement", "after_attack", "Average", "common_attacks", "NC_watermark", 0.93, note="Paper states average NC is higher than 0.93 under common attacks; this is a lower-bound statement, not an exact mean."),
+            _r("hess_nha2023", p, "Section 4.2", "metadata", "All", "payload", "watermark_side", 32, "px", note="Original paper watermarks are 32x32 binary; project implementation adapts to 64x64."),
+        ]
     if "dwt_hd_svd_2025" in ids:
         p = "Dong, Yan and Yin 2024"
         rows += [

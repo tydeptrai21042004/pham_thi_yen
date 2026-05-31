@@ -1,6 +1,6 @@
 # Clean baseline methods
 
-This project keeps only the four paper baselines requested by the user plus the proposal method.
+This project keeps the requested paper baselines plus the proposal method.
 
 ## Method IDs
 
@@ -10,6 +10,7 @@ This project keeps only the four paper baselines requested by the user plus the 
 | `guo2017_dwt_qr_fa` | Guo et al. 2017, DWT-QR with Firefly Algorithm | `src/watermarklab/methods/guo2017_dwt_qr_fa.py` |
 | `gaata2022_dwt_hess_fwa` | Gaata et al. 2022, DWT-Hessenberg with Firework Algorithm | `src/watermarklab/methods/gaata2022_dwt_hess_fwa.py` |
 | `dwt_hd_svd_2025` | Dong et al. 2024/2025, DWT-HD-SVD with logistic chaos | `src/watermarklab/methods/dwt_hd_svd2025.py` |
+| `hess_nha2023` | Nha et al. 2023, blind Hessenberg H(2,2) quantization, adapted to 64x64 watermark | `src/watermarklab/methods/hess_nha2023.py` |
 | `proposal` | Your proposed Q/H DWT-Hessenberg method | `src/watermarklab/methods/proposal_qh_dwt_hess.py` |
 
 Removed from the old project: `roy2018`, `iwt_hess_svd_2024`, `mahto2022_firefly_dual`, old smoke-result folders, old refactor changelogs, and obsolete tests.
