@@ -162,11 +162,29 @@ def clahe_like(image: Array, **kwargs) -> Array:
 
 
 def rotate_keep_size(image: Array, degrees: float = 5.0, fill: int = 0, **kwargs) -> Array:
+    """Rotate the image once and keep the original canvas size.
+
+    This is the ordinary geometric rotation attack: rotate by ``degrees`` and
+    do not compensate it.  The output keeps the original HxW size by cropping
+    or filling the exposed background.
+    """
     pil = Image.fromarray(_u8(image))
     return np.asarray(
         pil.rotate(float(degrees), resample=Image.Resampling.BICUBIC, expand=False, fillcolor=(fill, fill, fill)),
         dtype=np.uint8,
     )
+
+
+def rotate_then_rotate_back(image: Array, degrees: float = 5.0, fill: int = 0, **kwargs) -> Array:
+    """Rotate by ``degrees`` and then rotate back by ``-degrees``.
+
+    Many watermark papers report this second variant because it simulates a
+    rotation attack followed by geometric re-synchronization.  The output is
+    aligned with the original image size, but it still contains interpolation
+    loss and border/fill artifacts from the two rotations.
+    """
+    first = rotate_keep_size(image, degrees=degrees, fill=fill)
+    return rotate_keep_size(first, degrees=-float(degrees), fill=fill)
 
 
 def translate(image: Array, shift_x: int = 5, shift_y: int = 5, fill: int = 0, **kwargs) -> Array:
@@ -440,6 +458,7 @@ _ATTACK_FUNCS: dict[str, Callable[..., Array]] = {
     "hist_equalization": hist_equalization,
     "clahe_like": clahe_like,
     "rotation": rotate_keep_size,
+    "rotation_back": rotate_then_rotate_back,
     "translation": translate,
     "resize": resize_attack,
     "crop_resize": crop_resize,
@@ -497,6 +516,22 @@ def lite_attack_suite(include_none: bool = True) -> list[AttackConfig]:
 
 
 def full_attack_suite(include_none: bool = True) -> list[AttackConfig]:
+    """Full attack suite.
+
+    This keeps all attacks from the previous full suite and adds the attacks
+    listed in ``Robus _propose.docx``:
+
+    - Speckle noise: 0.01 and 0.05
+    - Salt & pepper noise: 0.05, 0.10, and 0.20
+    - JPEG2000 ratios: 3:1, 5:1, 7:1, and 10:1
+    - Lowpass filter: 3x3 and 5x5
+    - Rotation: 15, 30, 45 degrees
+    - Rotation-back variants: rotate by angle, then rotate back by -angle
+    - Cropping/scaling/gamma/blur variants from the requested table
+    - Combined attacks from the requested table
+
+    Existing attacks are not removed; this only extends the full preset.
+    """
     attacks = [
         AttackConfig("no_attack", "none", {}),
         # Compression
@@ -505,41 +540,70 @@ def full_attack_suite(include_none: bool = True) -> list[AttackConfig]:
         AttackConfig("jpeg_q70", "jpeg", {"quality": 70}),
         AttackConfig("jpeg_q50", "jpeg", {"quality": 50}),
         AttackConfig("jpeg_q30", "jpeg", {"quality": 30}),
+        AttackConfig("jpeg2000_3_to_1", "jpeg2000", {"quality_layer": 3.0}),
+        AttackConfig("jpeg2000_5_to_1", "jpeg2000", {"quality_layer": 5.0}),
+        AttackConfig("jpeg2000_7_to_1", "jpeg2000", {"quality_layer": 7.0}),
+        # Backward-compatible old name retained as an alias-like separate entry.
         AttackConfig("jpeg2000_q7", "jpeg2000", {"quality_layer": 7.0}),
+        AttackConfig("jpeg2000_10_to_1", "jpeg2000", {"quality_layer": 10.0}),
         # Noise
         AttackConfig("gaussian_noise_sigma2", "gaussian_noise", {"sigma": 2.0, "seed": 123}),
         AttackConfig("gaussian_noise_sigma5", "gaussian_noise", {"sigma": 5.0, "seed": 123}),
         AttackConfig("gaussian_noise_sigma10", "gaussian_noise", {"sigma": 10.0, "seed": 123}),
+        AttackConfig("gaussian_noise_var_0p003", "gaussian_noise_var", {"variance": 0.003, "seed": 123}),
+        AttackConfig("gaussian_noise_var_0p005", "gaussian_noise_var", {"variance": 0.005, "seed": 123}),
         AttackConfig("salt_pepper_0p002", "salt_pepper", {"amount": 0.002, "seed": 123}),
         AttackConfig("salt_pepper_0p005", "salt_pepper", {"amount": 0.005, "seed": 123}),
         AttackConfig("salt_pepper_0p01", "salt_pepper", {"amount": 0.01, "seed": 123}),
+        AttackConfig("salt_pepper_0p05", "salt_pepper", {"amount": 0.05, "seed": 123}),
+        AttackConfig("salt_pepper_0p10", "salt_pepper", {"amount": 0.10, "seed": 123}),
+        AttackConfig("salt_pepper_0p20", "salt_pepper", {"amount": 0.20, "seed": 123}),
         AttackConfig("speckle_var_0p001", "speckle_noise", {"variance": 0.001, "seed": 123}),
         AttackConfig("speckle_var_0p005", "speckle_noise", {"variance": 0.005, "seed": 123}),
+        AttackConfig("speckle_var_0p01", "speckle_noise", {"variance": 0.01, "seed": 123}),
+        AttackConfig("speckle_var_0p05", "speckle_noise", {"variance": 0.05, "seed": 123}),
         AttackConfig("poisson_peak_64", "poisson_noise", {"peak": 64.0, "seed": 123}),
         # Filters and enhancement
         AttackConfig("median_3x3", "median_filter", {"size": 3}),
         AttackConfig("median_5x5", "median_filter", {"size": 5}),
         AttackConfig("average_3x3", "average_filter", {"size": 3}),
         AttackConfig("average_5x5", "average_filter", {"size": 5}),
+        AttackConfig("lowpass_3x3", "lowpass", {"size": 3}),
         AttackConfig("lowpass_5x5", "lowpass", {"size": 5}),
+        AttackConfig("gaussian_blur_r0p5", "gaussian_blur", {"radius": 0.5}),
         AttackConfig("gaussian_blur_r1", "gaussian_blur", {"radius": 1.0}),
         AttackConfig("gaussian_blur_r2", "gaussian_blur", {"radius": 2.0}),
         AttackConfig("motion_blur_h9", "motion_blur", {"size": 9, "angle": "horizontal"}),
+        AttackConfig("sharpen_1p0", "unsharp_mask", {"radius": 1.0, "percent": 100, "threshold": 0}),
         AttackConfig("sharpen_1p5", "sharpen", {"factor": 1.5}),
         AttackConfig("unsharp_mask", "unsharp_mask", {"radius": 2.0, "percent": 150, "threshold": 3}),
         AttackConfig("hist_equalization", "hist_equalization", {}),
         AttackConfig("clahe_like", "clahe_like", {}),
-        # Geometric and cropping
+        # Geometric and cropping.
+        # "rotation_*" means rotate once and do not rotate back.
         AttackConfig("rotation_1deg", "rotation", {"degrees": 1.0}),
         AttackConfig("rotation_2deg", "rotation", {"degrees": 2.0}),
         AttackConfig("rotation_5deg", "rotation", {"degrees": 5.0}),
+        AttackConfig("rotation_10deg", "rotation", {"degrees": 10.0}),
+        AttackConfig("rotation_15deg", "rotation", {"degrees": 15.0}),
+        AttackConfig("rotation_30deg", "rotation", {"degrees": 30.0}),
         AttackConfig("rotation_45deg", "rotation", {"degrees": 45.0}),
+        # "rotation_back_*" means rotate by angle, then rotate back by -angle.
+        AttackConfig("rotation_back_1deg", "rotation_back", {"degrees": 1.0}),
+        AttackConfig("rotation_back_2deg", "rotation_back", {"degrees": 2.0}),
+        AttackConfig("rotation_back_5deg", "rotation_back", {"degrees": 5.0}),
+        AttackConfig("rotation_back_10deg", "rotation_back", {"degrees": 10.0}),
+        AttackConfig("rotation_back_15deg", "rotation_back", {"degrees": 15.0}),
+        AttackConfig("rotation_back_30deg", "rotation_back", {"degrees": 30.0}),
+        AttackConfig("rotation_back_45deg", "rotation_back", {"degrees": 45.0}),
         AttackConfig("translation_5_5", "translation", {"shift_x": 5, "shift_y": 5}),
         AttackConfig("resize_0p5", "resize", {"factor": 0.5}),
         AttackConfig("resize_0p75", "resize", {"factor": 0.75}),
         AttackConfig("resize_1p5", "resize", {"factor": 1.5}),
         AttackConfig("crop_resize_95", "crop_resize", {"keep": 0.95}),
         AttackConfig("crop_resize_90", "crop_resize", {"keep": 0.90}),
+        AttackConfig("crop_resize_75", "crop_resize", {"keep": 0.75}),
+        AttackConfig("crop_resize_50", "crop_resize", {"keep": 0.50}),
         AttackConfig("random_crop_resize_90", "crop_resize", {"keep": 0.90, "random_crop": True, "seed": 123}),
         AttackConfig("occlusion_32", "occlusion", {"block": 32, "num_blocks": 1, "seed": 123}),
         AttackConfig("occlusion_64", "occlusion", {"block": 64, "num_blocks": 1, "seed": 123}),
@@ -571,6 +635,36 @@ def full_attack_suite(include_none: bool = True) -> list[AttackConfig]:
         AttackConfig("border_crop_pad_16", "border_crop_pad", {"pixels": 16, "value": 0}),
         AttackConfig("color_quantization_64", "color_quantization", {"colors": 64}),
         AttackConfig("color_quantization_32", "color_quantization", {"colors": 32}),
+        # Combined attacks from Robus _propose.docx Table 3.
+        AttackConfig("combined_jpeg2000_7_to_1_resize_0p5", "combined", {"steps": [
+            {"group": "jpeg2000", "params": {"quality_layer": 7.0}},
+            {"group": "resize", "params": {"factor": 0.5}},
+        ]}),
+        AttackConfig("combined_jpeg2000_7_to_1_rotation_10deg", "combined", {"steps": [
+            {"group": "jpeg2000", "params": {"quality_layer": 7.0}},
+            {"group": "rotation", "params": {"degrees": 10.0}},
+        ]}),
+        AttackConfig("combined_jpeg2000_7_to_1_rotation_back_10deg", "combined", {"steps": [
+            {"group": "jpeg2000", "params": {"quality_layer": 7.0}},
+            {"group": "rotation_back", "params": {"degrees": 10.0}},
+        ]}),
+        AttackConfig("combined_resize_0p5_blur_0p5", "combined", {"steps": [
+            {"group": "resize", "params": {"factor": 0.5}},
+            {"group": "gaussian_blur", "params": {"radius": 0.5}},
+        ]}),
+        AttackConfig("combined_sharpen_0p5_jpeg90", "combined", {"steps": [
+            {"group": "unsharp_mask", "params": {"radius": 0.5, "percent": 50, "threshold": 0}},
+            {"group": "jpeg", "params": {"quality": 90}},
+        ]}),
+        AttackConfig("combined_speckle_0p001_resize_0p5", "combined", {"steps": [
+            {"group": "speckle_noise", "params": {"variance": 0.001, "seed": 123}},
+            {"group": "resize", "params": {"factor": 0.5}},
+        ]}),
+        AttackConfig("combined_sharpen_0p5_speckle_0p001_jpeg2000_7_to_1", "combined", {"steps": [
+            {"group": "unsharp_mask", "params": {"radius": 0.5, "percent": 50, "threshold": 0}},
+            {"group": "speckle_noise", "params": {"variance": 0.001, "seed": 123}},
+            {"group": "jpeg2000", "params": {"quality_layer": 7.0}},
+        ]}),
     ]
     return attacks if include_none else attacks[1:]
 
