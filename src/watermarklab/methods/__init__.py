@@ -6,6 +6,7 @@ from watermarklab.methods.guo2017_dwt_qr_fa import Guo2017DWTQRFA
 from watermarklab.methods.gaata2022_dwt_hess_fwa import Gaata2022DWTHessFWA
 from watermarklab.methods.dwt_hd_svd2025 import DWTHDSVD2025
 from watermarklab.methods.hess_nha2023 import HessNha2023Hessenberg
+from watermarklab.methods.roy2018_dwt_svd import Roy2018DWTSVD
 from watermarklab.methods.proposal_qh_dwt_hess import ProposalQHDWTHess, ProposalParams
 
 BASELINE_METHOD_IDS = [
@@ -14,6 +15,7 @@ BASELINE_METHOD_IDS = [
     "gaata2022_dwt_hess_fwa",
     "dwt_hd_svd_2025",
     "hess_nha2023",
+    "roy2018_dwt_svd",
 ]
 DEFAULT_METHOD_IDS = BASELINE_METHOD_IDS + ["proposal"]
 
@@ -35,6 +37,7 @@ def build_methods(selected: list[str] | None = None, proposal_options: dict[str,
         "gaata2022_dwt_hess_fwa": Gaata2022DWTHessFWA(mode=baseline_modes.get("gaata2022_dwt_hess_fwa", "adapt")),
         "dwt_hd_svd_2025": DWTHDSVD2025(mode=baseline_modes.get("dwt_hd_svd_2025", "adapt")),
         "hess_nha2023": HessNha2023Hessenberg(mode=baseline_modes.get("hess_nha2023", "adapt")),
+        "roy2018_dwt_svd": Roy2018DWTSVD(mode=baseline_modes.get("roy2018_dwt_svd", "adapt")),
         "proposal": ProposalQHDWTHess(params=proposal_params, **proposal_options),
     }
 
@@ -56,6 +59,7 @@ __all__ = [
     "Gaata2022DWTHessFWA",
     "DWTHDSVD2025",
     "HessNha2023Hessenberg",
+    "Roy2018DWTSVD",
     "ProposalQHDWTHess",
     "ProposalParams",
     "BASELINE_METHOD_IDS",
