@@ -14,12 +14,6 @@ from watermarklab.common.embedding_math import (
 # =========================================================
 # DWT-HD-SVD 2025 Logistic chaotic mapping
 # =========================================================
-# The paper reports x0 = 0.5 and mu = 4 for Logistic encryption.
-# In exact arithmetic, x0 = 0.5, mu = 4 gives the degenerate orbit
-# 0.5 -> 1 -> 0 -> 0 -> ..., so it is not a useful chaotic key stream.
-# This corrected implementation keeps mu = 4 and XOR-only encryption, but
-# uses a deterministic non-degenerate seed near the reported x0 so the mask is
-# non-constant and encryption/decryption remain reproducible.
 
 PAPER_REPORTED_LOGISTIC_X0 = 0.5
 PAPER_LOGISTIC_X0 = 0.517
@@ -27,15 +21,16 @@ PAPER_LOGISTIC_MU = 4.0
 PAPER_BETA = 0.95
 WM_THRESHOLD = 127
 
+# Paper Eq. (8): lambda = 0.04.
+PAPER_ALPHA_LAMBDA = 0.04
 
-def _paper_logistic_sequence(n: int, x0: float = PAPER_LOGISTIC_X0, mu: float = PAPER_LOGISTIC_MU) -> np.ndarray:
-    """Generate a deterministic non-degenerate Logistic key stream.
 
-    No burn-in and no permutation are used because the paper describes
-    Logistic chaotic mapping as an XOR key stream, not a permutation-plus-mask
-    scheme.  A tiny guard is applied only if a caller explicitly passes a
-    degenerate seed such as exactly 0, 0.5, or 1.
-    """
+def _paper_logistic_sequence(
+    n: int,
+    x0: float = PAPER_LOGISTIC_X0,
+    mu: float = PAPER_LOGISTIC_MU,
+) -> np.ndarray:
+    """Generate a deterministic Logistic key stream."""
     n = int(n)
     if n < 0:
         raise ValueError("n must be non-negative")
@@ -48,8 +43,9 @@ def _paper_logistic_sequence(n: int, x0: float = PAPER_LOGISTIC_X0, mu: float = 
     if not (3.5699456 < mu <= 4.0):
         raise ValueError("Logistic mu should be in the chaotic range (3.5699456, 4]")
 
-    # Avoid fixed/degenerate binary-orbit seeds.  This keeps explicit calls with
-    # x0=0.5 from producing the constant 255,0,0,... mask.
+    # The paper reports x0 = 0.5, but x0 = 0.5 and mu = 4 degenerates:
+    # 0.5 -> 1 -> 0 -> 0 ...
+    # Keep the existing corrected-key behavior.
     if x in (0.5,):
         x = PAPER_LOGISTIC_X0
 
@@ -59,8 +55,6 @@ def _paper_logistic_sequence(n: int, x0: float = PAPER_LOGISTIC_X0, mu: float = 
     for i in range(n):
         x = mu * x * (1.0 - x)
 
-        # Keep the state inside the open interval so the sequence cannot become
-        # exactly 0 or 1 after finite-precision rounding.
         if x <= 0.0:
             x = eps
         elif x >= 1.0:
@@ -78,7 +72,6 @@ def _paper_logistic_mask(
 ) -> np.ndarray:
     seq = _paper_logistic_sequence(int(np.prod(shape)), x0=x0, mu=mu)
 
-    # Convert chaotic samples to an 8-bit XOR key stream.
     mask = np.floor(seq * 256.0).astype(np.uint16)
     mask = np.clip(mask, 0, 255).astype(np.uint8)
 
@@ -103,7 +96,9 @@ def _paper_logistic_xor_decrypt_uint8(encrypted: np.ndarray, mask: np.ndarray):
     mask = np.asarray(mask, dtype=np.uint8)
 
     if data.shape != mask.shape:
-        raise ValueError(f"Encrypted watermark shape {data.shape} and mask shape {mask.shape} do not match")
+        raise ValueError(
+            f"Encrypted watermark shape {data.shape} and mask shape {mask.shape} do not match"
+        )
 
     decrypted = np.bitwise_xor(data, mask).astype(np.uint8)
 
@@ -116,9 +111,75 @@ def _singular_value_beta_correction(
 ) -> np.ndarray:
     """Apply the paper's singular-value correction S^beta, beta=0.95."""
     s = np.asarray(singular_values, dtype=np.float64)
-
-    # SVD singular values are non-negative; maximum is just a safety guard.
     return np.power(np.maximum(s, 0.0), float(beta))
+
+
+# =========================================================
+# DWT-HD-SVD 2025 adaptive entropy alpha
+# =========================================================
+
+def _pixel_probabilities_u8(image: np.ndarray, bins: int = 256) -> np.ndarray:
+    """Return non-zero gray-level probabilities p_i.
+
+    The paper computes Ev and Ee from pixel-value probabilities p_i.
+    Since the watermark is embedded in the Y component, this function should
+    be applied to the Y channel of the cover image.
+    """
+    arr = np.clip(np.rint(image), 0, bins - 1).astype(np.uint8)
+    counts = np.bincount(arr.ravel(), minlength=bins).astype(np.float64)
+
+    total = float(counts.sum())
+    if total <= 0.0:
+        raise ValueError("Cannot compute entropy from an empty image")
+
+    p = counts / total
+    return p[p > 0.0]
+
+
+def compute_visual_entropy(image: np.ndarray) -> float:
+    """Paper Eq. (9): Ev = -sum_i p_i log(p_i).
+
+    The paper does not state the logarithm base clearly. For 8-bit image
+    entropy, log2 is the standard Shannon entropy convention and gives alpha
+    values in the same range as the paper's Table 1.
+    """
+    p = _pixel_probabilities_u8(image)
+    return float(-np.sum(p * np.log2(p)))
+
+
+def compute_edge_entropy(image: np.ndarray) -> float:
+    """Paper Eq. (10): Ee = sum_i p_i * e^(1 - p_i).
+
+    The printed equation depends on gray-level probabilities p_i, not on an
+    explicit edge detector. This follows the printed equation directly.
+    """
+    p = _pixel_probabilities_u8(image)
+    return float(np.sum(p * np.exp(1.0 - p)))
+
+
+def compute_adaptive_alpha(
+    cover_y: np.ndarray,
+    lambda_value: float = PAPER_ALPHA_LAMBDA,
+) -> tuple[float, float, float]:
+    """Compute DWT-HD-SVD 2025 adaptive embedding factor.
+
+    Paper Eq. (8):
+
+        alpha = lambda / (1 + exp(-(Ee / Ev)))
+
+    Returns:
+        alpha, visual_entropy, edge_entropy
+    """
+    ev = compute_visual_entropy(cover_y)
+    ee = compute_edge_entropy(cover_y)
+
+    if ev <= 0.0:
+        ratio = 0.0
+    else:
+        ratio = ee / ev
+
+    alpha = float(lambda_value) / (1.0 + np.exp(-ratio))
+    return float(alpha), float(ev), float(ee)
 
 
 @dataclass
@@ -135,6 +196,12 @@ class DWTHDSVDKey:
     logistic_x0: float = PAPER_LOGISTIC_X0
     logistic_mu: float = PAPER_LOGISTIC_MU
 
+    # Added for adaptive-alpha tracking.
+    alpha_mode: str = "adaptive_entropy"
+    lambda_value: float = PAPER_ALPHA_LAMBDA
+    visual_entropy: float | None = None
+    edge_entropy: float | None = None
+
 
 class DWTHDSVD2025:
     name = "DWT_HD_SVD_2025"
@@ -148,15 +215,33 @@ class DWTHDSVD2025:
         logistic_mu: float = PAPER_LOGISTIC_MU,
         beta_correction_mode: str = "auto",
         beta_auto_threshold: float = 1e-3,
+        alpha_mode: str = "adaptive_entropy",
+        lambda_value: float = PAPER_ALPHA_LAMBDA,
     ):
-        # Common-benchmark adaptation:
-        # - default mode accepts 64x64 binary watermark.
-        # - original-rerun mode accepts 256x256 watermark.
+        # alpha_mode:
+        #   "adaptive_entropy" = paper Eq. (8)
+        #   "fixed"            = old fixed-alpha behavior for ablation only
         self.alpha = float(alpha)
         self.mode = str(mode)
         self.beta = float(beta)
         self.logistic_x0 = float(logistic_x0)
         self.logistic_mu = float(logistic_mu)
+
+        self.alpha_mode = str(alpha_mode).lower().strip()
+        if self.alpha_mode not in {
+            "adaptive",
+            "adaptive_entropy",
+            "paper",
+            "fixed",
+            "constant",
+        }:
+            raise ValueError(
+                "alpha_mode must be one of: adaptive_entropy, adaptive, paper, fixed, constant"
+            )
+
+        self.lambda_value = float(lambda_value)
+        if self.lambda_value <= 0.0:
+            raise ValueError("lambda_value must be positive")
 
         self.beta_correction_mode = str(beta_correction_mode).lower().strip()
         if self.beta_correction_mode not in {"auto", "always", "off", "none", "false"}:
@@ -166,6 +251,17 @@ class DWTHDSVD2025:
 
     def _expected_watermark_shape(self) -> tuple[int, int]:
         return (256, 256) if self.mode == "original-rerun" else (64, 64)
+
+    def _select_alpha(self, cover_y: np.ndarray) -> tuple[float, float | None, float | None]:
+        """Return alpha used in Eq. (17), plus Ev/Ee if adaptive."""
+        if self.alpha_mode in {"adaptive", "adaptive_entropy", "paper"}:
+            alpha, ev, ee = compute_adaptive_alpha(
+                cover_y,
+                lambda_value=self.lambda_value,
+            )
+            return alpha, ev, ee
+
+        return float(self.alpha), None, None
 
     def embed(self, host_rgb: np.ndarray, watermark_binary: np.ndarray):
         y, cb, cr = rgb_to_ycbcr(host_rgb)
@@ -180,41 +276,40 @@ class DWTHDSVD2025:
                 f"{expected_shape[0]}x{expected_shape[1]} binary watermark, got {wm.shape}"
             )
 
-        # Keep your accepted 64x64 adaptation:
-        # embed into same-sized top-left LL ROI.
-        roi = ll[:expected_shape[0], :expected_shape[1]].copy()
+        # Adapted mode: 64x64 top-left LL ROI.
+        # original-rerun mode: 256x256, which equals full LL for 512x512 host.
+        roi = ll[: expected_shape[0], : expected_shape[1]].copy()
 
-        # Corrected Logistic XOR encryption:
-        # reported x0=0.5 is degenerate, so the default uses x0=0.517,
-        # mu=4, no burn-in, and no permutation.
+        # Corrected part:
+        # Paper Eq. (8), alpha is now image-dependent.
+        alpha_used, ev, ee = self._select_alpha(y)
+
         wm_enc, mask = _paper_logistic_xor_encrypt_uint8(
             wm,
             x0=self.logistic_x0,
             mu=self.logistic_mu,
         )
 
-        # SVD of encrypted watermark.
         uw, sw, vtw = np.linalg.svd(wm_enc, full_matrices=True)
 
-        # DWT-HD-SVD cover branch.
         q, h = hess_decompose(roi)
         uh, sh, vth = np.linalg.svd(h, full_matrices=True)
 
-        # Eq. (17): S'_H = alpha*S_w + (1-alpha)*S_H
-        sh_prime = alpha_blend_payload_weight(sh, sw, self.alpha)
+        # Paper Eq. (17):
+        # S'_H = alpha*S_w + (1-alpha)*S_H
+        sh_prime = alpha_blend_payload_weight(sh, sw, alpha_used)
 
-        # Inverse SVD and inverse Hessenberg reconstruction.
         h_prime = uh @ diag_from_s(sh_prime, h.shape) @ vth
         roi_prime = hess_reconstruct(q, h_prime)
 
         ll2 = ll.copy()
-        ll2[:expected_shape[0], :expected_shape[1]] = roi_prime
+        ll2[: expected_shape[0], : expected_shape[1]] = roi_prime
 
         y2 = idwt2(ll2, lh, hl, hh, mode="orthonormal")
         watermarked = ycbcr_to_rgb(y2, cb, cr)
 
         key = DWTHDSVDKey(
-            alpha=self.alpha,
+            alpha=alpha_used,
             beta=self.beta,
             uw=uw,
             vtw=vtw,
@@ -225,6 +320,10 @@ class DWTHDSVD2025:
             wm_shape_out=wm.shape,
             logistic_x0=self.logistic_x0,
             logistic_mu=self.logistic_mu,
+            alpha_mode=self.alpha_mode,
+            lambda_value=self.lambda_value,
+            visual_entropy=ev,
+            edge_entropy=ee,
         )
 
         return watermarked, key
@@ -238,21 +337,11 @@ class DWTHDSVD2025:
         y, _, _ = rgb_to_ycbcr(possibly_attacked_rgb)
         ll, _, _, _ = dwt2(y, mode="orthonormal")
 
-        roi = ll[:key.ll_roi_shape[0], :key.ll_roi_shape[1]]
+        roi = ll[: key.ll_roi_shape[0], : key.ll_roi_shape[1]]
 
         _, h_wm = hess_decompose(roi)
         _, swm, _ = np.linalg.svd(h_wm, full_matrices=True)
 
-        # Paper Step 5: singular-value correction S^beta, beta=0.95.
-        #
-        # In the 64x64 adaptation, applying S^beta to a clean image can
-        # over-correct the spectrum and damage clean extraction.
-        #
-        # Default "auto":
-        # - clean/almost-clean spectrum: skip correction
-        # - attacked spectrum with visible drift: apply S^beta
-        #
-        # Use beta_correction_mode="always" to force literal paper correction.
         mode = self.beta_correction_mode
         apply_beta = False
 
@@ -275,7 +364,8 @@ class DWTHDSVD2025:
         else:
             swm_for_extract = swm
 
-        # Eq. (25): S'_W = (S_WM - (1-alpha)*S_H) / alpha
+        # Paper Eq. (25):
+        # S'_W = (S_WM - (1-alpha)*S_H) / alpha
         sw_ext = extract_from_alpha_blend_payload_weight(
             swm_for_extract,
             key.sh_original,
@@ -285,7 +375,6 @@ class DWTHDSVD2025:
         n = key.uw.shape[0]
         enc = key.uw @ diag_from_s(sw_ext[:n], (n, n)) @ key.vtw
 
-        # Corrected inverse Logistic XOR decryption.
         dec = _paper_logistic_xor_decrypt_uint8(
             np.clip(np.rint(enc), 0, 255).astype(np.uint8),
             key.chaotic_mask,
