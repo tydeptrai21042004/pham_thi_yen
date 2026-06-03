@@ -20,7 +20,13 @@ BASELINE_METHOD_IDS = [
 DEFAULT_METHOD_IDS = BASELINE_METHOD_IDS + ["proposal"]
 
 
-def build_methods(selected: list[str] | None = None, proposal_options: dict[str, Any] | None = None, baseline_modes: dict[str, str] | None = None, guo_options: dict[str, Any] | None = None):
+def build_methods(
+    selected: list[str] | None = None,
+    proposal_options: dict[str, Any] | None = None,
+    baseline_modes: dict[str, str] | None = None,
+    guo_options: dict[str, Any] | None = None,
+    gaata_options: dict[str, Any] | None = None,
+):
     """Build registered methods.
 
     selected may be None/['all'], ['baselines'], or an explicit list of method ids.
@@ -30,11 +36,12 @@ def build_methods(selected: list[str] | None = None, proposal_options: dict[str,
     proposal_params = params_data if isinstance(params_data, ProposalParams) else ProposalParams.from_dict(params_data)
     baseline_modes = dict(baseline_modes or {})
     guo_options = dict(guo_options or {})
+    gaata_options = dict(gaata_options or {})
 
     all_methods = {
         "kumar2021": Kumar2021DWTEntropy(mode=baseline_modes.get("kumar2021", "adapt")),
         "guo2017_dwt_qr_fa": Guo2017DWTQRFA(mode=baseline_modes.get("guo2017_dwt_qr_fa", "adapt"), **guo_options),
-        "gaata2022_dwt_hess_fwa": Gaata2022DWTHessFWA(mode=baseline_modes.get("gaata2022_dwt_hess_fwa", "adapt")),
+        "gaata2022_dwt_hess_fwa": Gaata2022DWTHessFWA(mode=baseline_modes.get("gaata2022_dwt_hess_fwa", "adapt"), **gaata_options),
         "dwt_hd_svd_2025": DWTHDSVD2025(mode=baseline_modes.get("dwt_hd_svd_2025", "adapt")),
         "hess_nha2023": HessNha2023Hessenberg(mode=baseline_modes.get("hess_nha2023", "adapt")),
         "roy2018_dwt_svd": Roy2018DWTSVD(mode=baseline_modes.get("roy2018_dwt_svd", "adapt")),

@@ -15,7 +15,10 @@ from watermarklab.common.attack import default_attack_suite, apply_attack
 from watermarklab.common.metrics import psnr, ssim, nc, ncc, ber
 from watermarklab.methods import build_methods, BASELINE_METHOD_IDS
 from watermarklab.methods.guo2017_dwt_qr_fa import Guo2017DWTQRFA
+from watermarklab.methods.gaata2022_dwt_hess_fwa import Gaata2022DWTHessFWA
 from watermarklab.methods.proposal_qh_dwt_hess import ProposalParams, ProposalQHDWTHess, optimization_param_snapshot
+from watermarklab.vendor.dwt_hess_fwa.watermark import WatermarkConfig
+from watermarklab.vendor.dwt_hess_fwa.fwa import optimize_key_params
 from watermarklab.paper_reported import write_paper_reported
 
 
@@ -23,6 +26,8 @@ OPT_PARAM_FORMAT = "watermarklab_proposal_optimization_params_v1"
 DEFAULT_PROPOSAL_PARAM_FILE = "results/proposal_optimized_params.json"
 GUO_PARAM_FORMAT = "watermarklab_guo2017_lambda_params_v1"
 DEFAULT_GUO_PARAM_FILE = "results/guo2017_lambda.json"
+GAATA_PARAM_FORMAT = "watermarklab_gaata2022_key_params_v1"
+DEFAULT_GAATA_PARAM_FILE = "results/gaata2022_key_params.json"
 
 
 def _safe_num(x):
@@ -188,6 +193,67 @@ def _select_guo_lambda_for_image(host_path: Path, loaded_payload: dict[str, Any]
     return None, "default"
 
 
+def load_gaata_param_file(path: str | Path) -> dict[str, Any]:
+    """Load optimized Gaata 2022 chaotic key parameters if present."""
+    path = Path(path)
+    if not path.exists():
+        return {"loaded": False, "path": str(path), "reason": "file_not_found", "per_image": {}, "global_key_params": None}
+
+    with open(path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    per_image: dict[str, tuple[float, float, float, float]] = {}
+    global_key_params: tuple[float, float, float, float] | None = None
+
+    def _coerce_params(value: Any) -> tuple[float, float, float, float] | None:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            # Support either {"key_params": [...]} or named x0/y0/r/b keys.
+            if "key_params" in value:
+                return _coerce_params(value["key_params"])
+            names = ["x0", "y0", "r", "b"]
+            if all(k in value for k in names):
+                return tuple(float(value[k]) for k in names)  # type: ignore[return-value]
+            if "best_params" in value:
+                return _coerce_params(value["best_params"])
+        if isinstance(value, (list, tuple)) and len(value) == 4:
+            return tuple(float(v) for v in value)  # type: ignore[return-value]
+        return None
+
+    if isinstance(raw, dict) and raw.get("format") == GAATA_PARAM_FORMAT:
+        gb = raw.get("global_best") or {}
+        global_key_params = _coerce_params(gb)
+        for key, rec in dict(raw.get("per_image", {})).items():
+            params = _coerce_params(rec)
+            if params is not None:
+                per_image[str(key)] = params
+                if isinstance(rec, dict) and rec.get("filename"):
+                    per_image[str(rec["filename"])] = params
+    elif isinstance(raw, dict):
+        global_key_params = _coerce_params(raw)
+
+    return {
+        "loaded": bool(global_key_params is not None or per_image),
+        "path": str(path),
+        "per_image": per_image,
+        "global_key_params": global_key_params,
+        "raw_format": raw.get("format") if isinstance(raw, dict) else type(raw).__name__,
+    }
+
+
+def _select_gaata_key_params_for_image(host_path: Path, loaded_payload: dict[str, Any] | None) -> tuple[tuple[float, float, float, float] | None, str]:
+    if not loaded_payload or not loaded_payload.get("loaded"):
+        return None, "default"
+    per_image = dict(loaded_payload.get("per_image", {}))
+    for key in [host_path.name, host_path.stem, str(host_path)]:
+        if key in per_image:
+            return tuple(float(v) for v in per_image[key]), f"optimized:{loaded_payload.get('path')}:{key}"
+    if loaded_payload.get("global_key_params") is not None:
+        return tuple(float(v) for v in loaded_payload["global_key_params"]), f"optimized:{loaded_payload.get('path')}:global"
+    return None, "default"
+
+
 def _select_proposal_params_for_image(host_path: Path, base_params: ProposalParams, loaded_payload: dict[str, Any] | None):
     if not loaded_payload or not loaded_payload.get("loaded"):
         return ProposalParams.from_dict(base_params.to_dict()), "default"
@@ -216,6 +282,7 @@ def run_benchmark(
     proposal_options: dict[str, Any] | None = None,
     baseline_modes: dict[str, str] | None = None,
     guo_options: dict[str, Any] | None = None,
+    gaata_options: dict[str, Any] | None = None,
 ):
     host_dir = Path(host_dir)
     output_dir = Path(output_dir)
@@ -223,8 +290,10 @@ def run_benchmark(
     baseline_modes = dict(baseline_modes or {})
     proposal_options = dict(proposal_options or {})
     guo_options = dict(guo_options or {})
+    gaata_options = dict(gaata_options or {})
     optimized_payload = proposal_options.pop("optimized_payload", None)
     guo_optimized_payload = guo_options.pop("optimized_payload", None)
+    gaata_optimized_payload = gaata_options.pop("optimized_payload", None)
 
     if selected_methods == ["baselines"]:
         selected_methods = list(BASELINE_METHOD_IDS)
@@ -239,7 +308,13 @@ def run_benchmark(
         return {"results": pd.DataFrame(), "summary": pd.DataFrame(), "comparison": pd.DataFrame(), "failures": [], "reported_methods": original_report_methods}
 
     runtime_baseline_modes = {m: mode for m, mode in baseline_modes.items() if mode != "original"}
-    methods = build_methods(runtime_selected, proposal_options=proposal_options, baseline_modes=runtime_baseline_modes, guo_options=guo_options)
+    methods = build_methods(
+        runtime_selected,
+        proposal_options=proposal_options,
+        baseline_modes=runtime_baseline_modes,
+        guo_options=guo_options,
+        gaata_options=gaata_options,
+    )
     host_paths = list_image_files(host_dir)
     if max_images is not None:
         host_paths = host_paths[: int(max_images)]
@@ -258,7 +333,13 @@ def run_benchmark(
             host = load_host_rgb(host_path)
             param_source = "not_proposal"
             guo_param_source = "not_guo"
+            gaata_param_source = "not_gaata"
             try:
+                if method_id == "gaata2022_dwt_hess_fwa" and isinstance(method, Gaata2022DWTHessFWA):
+                    selected_key_params, gaata_param_source = _select_gaata_key_params_for_image(host_path, gaata_optimized_payload)
+                    if selected_key_params is not None:
+                        method.config = WatermarkConfig(**{**method.config.__dict__, "key_params": selected_key_params})
+
                 if method_id == "guo2017_dwt_qr_fa" and isinstance(method, Guo2017DWTQRFA):
                     selected_lambda, guo_param_source = _select_guo_lambda_for_image(host_path, guo_optimized_payload)
                     if selected_lambda is not None:
@@ -279,6 +360,12 @@ def run_benchmark(
                 extract_clean_time = time.perf_counter() - t1
 
                 key_info = {"proposal_param_source": param_source} if method_id == "proposal" else {}
+                if method_id == "gaata2022_dwt_hess_fwa" and isinstance(method, Gaata2022DWTHessFWA):
+                    key_info["gaata_param_source"] = gaata_param_source
+                    key_info["gaata_decimal_position"] = int(method.config.decimal_position)
+                    key_info["gaata_key_strength"] = float(method.config.key_strength)
+                    key_info["gaata_key_params"] = json.dumps(list(method.config.key_params))
+                    key_info["gaata_use_fwa_inline"] = bool(method.use_fwa)
                 if method_id == "guo2017_dwt_qr_fa" and isinstance(method, Guo2017DWTQRFA):
                     key_info["guo_param_source"] = guo_param_source
                     key_info["guo_lambda_strength"] = float(method.lambda_strength)
@@ -635,6 +722,109 @@ def run_guo_optimization_phase(
     return payload
 
 
+
+def run_gaata_optimization_phase(
+    host_dir: str | Path,
+    watermark_path: str | Path,
+    output_file: str | Path,
+    *,
+    max_images: int | None = None,
+    invert_watermark: bool = False,
+    mode: str = "adapt",
+    decimal_position: int = 3,
+    key_strength: float = 0.020,
+    population_size: int = 8,
+    iterations: int = 3,
+    sparks_per_firework: int = 3,
+    seed: int = 2022,
+) -> dict[str, Any]:
+    """Run Gaata et al. 2022 FWA-style search for chaotic key parameters."""
+    host_dir = Path(host_dir)
+    output_file = Path(output_file)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    host_paths = list_image_files(host_dir)
+    if max_images is not None:
+        host_paths = host_paths[: int(max_images)]
+    if not host_paths:
+        raise ValueError(f"No host images found in {host_dir}")
+
+    watermark = load_watermark_binary(watermark_path, invert=invert_watermark)
+    wm_bits = (np.asarray(watermark) >= 127).astype(np.uint8)
+
+    # Build the same base configuration as the selected local mode, then force the
+    # paper decimal digit in adapt mode. This separates expensive FWA from the
+    # normal benchmark run.
+    base_method = Gaata2022DWTHessFWA(mode=mode, decimal_position=decimal_position, key_strength=key_strength)
+    base_config = base_method.config
+
+    per_image: dict[str, Any] = {}
+    rows: list[dict[str, Any]] = []
+    global_best: dict[str, Any] | None = None
+    global_best_mse = float("inf")
+
+    for idx, host_path in enumerate(host_paths):
+        host = load_host_rgb(host_path)
+        result = optimize_key_params(
+            host,
+            wm_bits,
+            base_config,
+            population_size=population_size,
+            iterations=iterations,
+            sparks_per_firework=sparks_per_firework,
+            seed=seed + idx * 100000,
+        )
+        entry = {
+            "image": host_path.stem,
+            "filename": host_path.name,
+            "key_params": [float(v) for v in result.best_params],
+            "best_mse": float(result.best_mse),
+            "best_psnr": float(result.best_psnr),
+            "decimal_position": int(base_config.decimal_position),
+            "key_strength": float(base_config.key_strength),
+            "history": result.history,
+        }
+        per_image[host_path.stem] = entry
+        per_image[host_path.name] = entry
+        if result.best_mse < global_best_mse:
+            global_best_mse = float(result.best_mse)
+            global_best = dict(entry)
+        rows.append({
+            "image": host_path.stem,
+            "filename": host_path.name,
+            "key_params": json.dumps([float(v) for v in result.best_params]),
+            "best_mse": float(result.best_mse),
+            "best_psnr": float(result.best_psnr),
+            "decimal_position": int(base_config.decimal_position),
+            "key_strength": float(base_config.key_strength),
+        })
+        print(f"[GAATA-OPT] {host_path.name}: psnr={result.best_psnr:.6f}, mse={result.best_mse:.6f}, key_params={entry['key_params']}")
+
+    payload = {
+        "format": GAATA_PARAM_FORMAT,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "host_dir": str(host_dir),
+        "watermark_path": str(watermark_path),
+        "mode": str(mode),
+        "param_names": ["x0", "y0", "r", "b"],
+        "global_best": global_best,
+        "per_image": per_image,
+    }
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False, default=_json_default)
+
+    csv_path = output_file.with_suffix(".csv")
+    if rows:
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+
+    print(f"Saved optimized Gaata key parameters to: {output_file}")
+    print(f"Saved optimized Gaata key parameter CSV to: {csv_path}")
+    return payload
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run the cleaned watermarking benchmark on 512x512 RGB host images and a 64x64 binary watermark.")
     parser.add_argument("--phase", default="normal", choices=["normal", "optimize", "optimization"], help="normal: run benchmark; optimize: search proposal parameters and export them.")
@@ -666,6 +856,15 @@ def main():
     parser.add_argument("--guo-lambda-min", type=float, default=0.05)
     parser.add_argument("--guo-lambda-max", type=float, default=20.0)
     parser.add_argument("--guo-optimizer-seed", type=int, default=2017)
+
+    parser.add_argument("--gaata-param-file", default=DEFAULT_GAATA_PARAM_FILE, help="JSON file written by Gaata FWA key-parameter optimization phase. Normal phase loads it automatically when it exists.")
+    parser.add_argument("--gaata-param-mode", default="auto", choices=["auto", "ignore", "require"], help="auto: use Gaata key-parameter file if present; ignore: default keys; require: fail if missing.")
+    parser.add_argument("--gaata-optimizer-population", type=int, default=8)
+    parser.add_argument("--gaata-optimizer-iterations", type=int, default=3)
+    parser.add_argument("--gaata-optimizer-sparks", type=int, default=3)
+    parser.add_argument("--gaata-optimizer-seed", type=int, default=2022)
+    parser.add_argument("--gaata-key-strength", type=float, default=0.020)
+    parser.add_argument("--gaata-decimal-position", type=int, default=3, help="Paper decimal digit after the floating point; default 3.")
 
     parser.add_argument("--proposal-param-file", default=DEFAULT_PROPOSAL_PARAM_FILE, help="JSON/CSV file written by optimization phase. Normal phase loads it automatically when it exists.")
     parser.add_argument("--proposal-param-mode", default="auto", choices=["auto", "ignore", "require"], help="auto: use param file if present; ignore: always defaults; require: fail if missing.")
@@ -714,6 +913,23 @@ def main():
             )
             return
 
+        if selected_normalized == ["gaata2022_dwt_hess_fwa"]:
+            run_gaata_optimization_phase(
+                host_dir=args.host_dir,
+                watermark_path=args.watermark,
+                output_file=args.gaata_param_file,
+                max_images=args.max_images,
+                invert_watermark=args.invert_watermark,
+                mode=args.baseline_mode if args.gaata_mode == "inherit" else args.gaata_mode,
+                decimal_position=int(args.gaata_decimal_position),
+                key_strength=float(args.gaata_key_strength),
+                population_size=int(args.gaata_optimizer_population),
+                iterations=int(args.gaata_optimizer_iterations),
+                sparks_per_firework=int(args.gaata_optimizer_sparks),
+                seed=int(args.gaata_optimizer_seed),
+            )
+            return
+
         run_proposal_optimization_phase(
             host_dir=args.host_dir,
             watermark_path=args.watermark,
@@ -756,6 +972,16 @@ def main():
         else:
             print(f"[NORMAL] No optimized Guo lambda file found; using default Guo lambda. Checked: {args.guo_param_file}")
 
+    gaata_optimized_payload = None
+    if args.gaata_param_mode != "ignore":
+        gaata_optimized_payload = load_gaata_param_file(args.gaata_param_file)
+        if args.gaata_param_mode == "require" and not gaata_optimized_payload.get("loaded"):
+            raise FileNotFoundError(f"Required Gaata key-parameter file was not loaded: {args.gaata_param_file}")
+        if gaata_optimized_payload.get("loaded"):
+            print(f"[NORMAL] Loaded optimized Gaata key parameters from: {args.gaata_param_file}")
+        else:
+            print(f"[NORMAL] No optimized Gaata key-parameter file found; using default Gaata keys. Checked: {args.gaata_param_file}")
+
     optimized_payload = None
     if args.proposal_param_mode != "ignore":
         optimized_payload = load_proposal_param_file(args.proposal_param_file)
@@ -776,6 +1002,11 @@ def main():
         "k_mode": "paper_integral",
         "optimized_payload": guo_optimized_payload,
     }
+    gaata_options = {
+        "decimal_position": int(args.gaata_decimal_position),
+        "key_strength": float(args.gaata_key_strength),
+        "optimized_payload": gaata_optimized_payload,
+    }
 
     result = run_benchmark(
         host_dir=args.host_dir,
@@ -789,6 +1020,7 @@ def main():
         proposal_options=proposal_options,
         baseline_modes=baseline_modes,
         guo_options=guo_options,
+        gaata_options=gaata_options,
     )
     if not result["results"].empty:
         print(f"Saved per-image results to: {Path(args.output) / 'per_image_attack_results.csv'}")
