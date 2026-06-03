@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from watermarklab.common.io_utils import load_host_rgb, load_watermark_binary, save_image, list_image_files
-from watermarklab.common.attack import default_attack_suite, apply_attack
+from watermarklab.common.attack import default_attack_suite, apply_attack, AttackConfig
 from watermarklab.common.metrics import psnr, ssim, nc, ncc, ber
 from watermarklab.methods import build_methods, BASELINE_METHOD_IDS
 from watermarklab.methods.guo2017_dwt_qr_fa import Guo2017DWTQRFA
@@ -825,9 +825,299 @@ def run_gaata_optimization_phase(
     return payload
 
 
+
+def _parse_csv_values(raw: str | None, cast=float) -> list[Any]:
+    if raw is None:
+        return []
+    parts = [p.strip() for p in str(raw).split(",") if str(p).strip()]
+    return [cast(p) for p in parts]
+
+
+def _proposal_plot_default_hosts() -> list[str]:
+    return ["airplane.bmp", "Girl.bmp", "house.bmp", "milkdrop.bmp", "safari.bmp", "tiffany.bmp"]
+
+
+def _resolve_proposal_plot_hosts(host_dir: str | Path, requested: list[str] | None) -> list[tuple[str, Path]]:
+    host_dir = Path(host_dir)
+    available = list_image_files(host_dir)
+    index: dict[str, Path] = {}
+    for p in available:
+        index[p.name.lower()] = p
+        index[p.stem.lower()] = p
+
+    alias = {
+        "girl": "lenna.bmp",
+        "girl.bmp": "lenna.bmp",
+        "lenna": "lenna.bmp",
+        "lenna.bmp": "lenna.bmp",
+        "airplane": "airplane.bmp",
+        "house": "house.bmp",
+        "milkdrop": "milkdrop.bmp",
+        "safari": "safari.bmp",
+        "tiffany": "tiffany.bmp",
+    }
+
+    wanted = requested or _proposal_plot_default_hosts()
+    resolved: list[tuple[str, Path]] = []
+    for item in wanted:
+        display = str(item).strip()
+        key = display.lower()
+        # Prefer an exact match from the dataset first. Only fall back to aliases
+        # such as Girl.bmp -> lenna.bmp when the exact filename is absent.
+        p = index.get(key) or index.get(Path(key).stem.lower())
+        if p is None:
+            target = alias.get(key, key)
+            p = index.get(target) or index.get(Path(target).stem.lower())
+        if p is None:
+            raise FileNotFoundError(f"Could not resolve proposal-plot host '{display}' inside {host_dir}")
+        resolved.append((display, p))
+    return resolved
+
+
+def _resolve_proposal_plot_watermarks(default_watermark: str | Path, raw_value: str | None) -> list[Path]:
+    if raw_value is None or not str(raw_value).strip():
+        return [Path(default_watermark)]
+    out: list[Path] = []
+    for item in [p.strip() for p in str(raw_value).split(",") if p.strip()]:
+        p = Path(item)
+        if p.is_dir():
+            for child in sorted(list_image_files(p)):
+                out.append(child)
+        else:
+            out.append(p)
+    return out
+
+
+def run_proposal_plot_phase(
+    *,
+    host_dir: str | Path,
+    watermark_path: str | Path,
+    output_dir: str | Path,
+    invert_watermark: bool,
+    host_names: list[str] | None,
+    watermark_paths: list[Path],
+    proposal_options: dict[str, Any] | None,
+    y_min: float = 0.70,
+    y_max: float = 1.00,
+    dpi: int = 180,
+    jpeg_values: list[int] | None = None,
+    salt_pepper_values: list[float] | None = None,
+    median_sizes: list[int] | None = None,
+    resize_values: list[float] | None = None,
+    jpeg2000_values: list[float] | None = None,
+    rotate_values: list[float] | None = None,
+    plot_layout: str = "single",
+):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    resolved_hosts = _resolve_proposal_plot_hosts(host_dir, host_names)
+    base_params = ProposalParams.from_dict((proposal_options or {}).get("params") or {"repeat": None, "dwt_mode": "pywt"})
+    optimized_payload = (proposal_options or {}).get("optimized_payload")
+    optimizer_trials = int((proposal_options or {}).get("optimizer_trials", 4))
+
+    jpeg_values = [int(v) for v in (jpeg_values or [90, 80, 70, 60, 50, 40, 30])]
+    salt_pepper_values = [float(v) for v in (salt_pepper_values or [0.01, 0.02, 0.03, 0.04, 0.05, 0.10, 0.15, 0.20])]
+    median_sizes = [int(v) for v in (median_sizes or [3, 5, 7, 9])]
+    resize_values = [float(v) for v in (resize_values or [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0])]
+    jpeg2000_values = [float(v) for v in (jpeg2000_values or [3, 5, 7, 10, 13, 15])]
+    rotate_values = [float(v) for v in (rotate_values or [5, 10, 15, 30, 45])]
+
+    attack_families = [
+        {
+            "key": "jpeg",
+            "title": "JPEG: NC vs Quality factor",
+            "xlabel": "Quality factor",
+            "group": "jpeg",
+            "values": jpeg_values,
+            "param_name": "quality",
+            "name_fmt": lambda v: f"plot_jpeg_q{int(v)}",
+        },
+        {
+            "key": "salt_pepper",
+            "title": "Salt & Pepper: NC vs Density",
+            "xlabel": "Density",
+            "group": "salt_pepper",
+            "values": salt_pepper_values,
+            "param_name": "amount",
+            "extra_params": {"seed": 123},
+            "name_fmt": lambda v: f"plot_salt_pepper_{str(v).replace('.', 'p')}",
+        },
+        {
+            "key": "median_filter",
+            "title": "Median Filter: NC vs Kernel size",
+            "xlabel": "Kernel size",
+            "group": "median_filter",
+            "values": median_sizes,
+            "param_name": "size",
+            "name_fmt": lambda v: f"plot_median_{int(v)}x{int(v)}",
+        },
+        {
+            "key": "resize",
+            "title": "Resize: NC vs Scale factor",
+            "xlabel": "Scale factor",
+            "group": "resize",
+            "values": resize_values,
+            "param_name": "factor",
+            "name_fmt": lambda v: f"plot_resize_{str(v).replace('.', 'p')}",
+        },
+        {
+            "key": "jpeg2000",
+            "title": "JPEG2000: NC vs Quality layer",
+            "xlabel": "Quality layer",
+            "group": "jpeg2000",
+            "values": jpeg2000_values,
+            "param_name": "quality_layer",
+            "name_fmt": lambda v: f"plot_jpeg2000_{str(v).replace('.', 'p')}",
+        },
+        {
+            "key": "rotation",
+            "title": "Rotation: NC vs Angle (deg)",
+            "xlabel": "Angle (deg)",
+            "group": "rotation",
+            "values": rotate_values,
+            "param_name": "degrees",
+            "name_fmt": lambda v: f"plot_rotate_{str(v).replace('.', 'p')}deg",
+        },
+    ]
+
+    rows: list[dict[str, Any]] = []
+    summary_rows: list[dict[str, Any]] = []
+
+    for wm_path in watermark_paths:
+        wm_path = Path(wm_path)
+        if not wm_path.exists():
+            raise FileNotFoundError(f"Proposal-plot watermark file not found: {wm_path}")
+        wm = load_watermark_binary(wm_path, invert=invert_watermark)
+        wm_label = wm_path.stem
+
+        for display_name, host_path in resolved_hosts:
+            host_rgb = load_host_rgb(host_path)
+            params, param_source = _select_proposal_params_for_image(host_path, base_params, optimized_payload)
+            method = ProposalQHDWTHess(params=params, use_optimizer=False, optimizer_trials=optimizer_trials)
+            watermarked, key = method.embed(host_rgb, wm)
+            clean_psnr = float(psnr(host_rgb, watermarked))
+            clean_ssim = float(ssim(host_rgb, watermarked))
+            clean_ext = method.extract(watermarked, key, host_rgb=host_rgb)
+            clean_nc = float(nc(wm, clean_ext))
+            clean_ber = float(ber(wm, clean_ext))
+            summary_rows.append({
+                "watermark_file": str(wm_path),
+                "watermark_name": wm_label,
+                "host_image": host_path.name,
+                "host_display_name": display_name,
+                "proposal_param_source": param_source,
+                "clean_psnr": clean_psnr,
+                "clean_ssim": clean_ssim,
+                "clean_nc": clean_nc,
+                "clean_ber": clean_ber,
+            })
+
+            for family in attack_families:
+                for order_idx, value in enumerate(family["values"]):
+                    params_dict = {family["param_name"]: value}
+                    params_dict.update(dict(family.get("extra_params", {})))
+                    attack = AttackConfig(family["name_fmt"](value), family["group"], params_dict)
+                    attacked = apply_attack(watermarked, attack)
+                    extracted = method.extract(attacked, key, host_rgb=host_rgb)
+                    rows.append({
+                        "watermark_file": str(wm_path),
+                        "watermark_name": wm_label,
+                        "host_image": host_path.name,
+                        "host_display_name": display_name,
+                        "proposal_param_source": param_source,
+                        "attack_family": family["key"],
+                        "attack_name": attack.name,
+                        "attack_group": family["group"],
+                        "x_value": float(value),
+                        "x_label": str(value),
+                        "x_order": int(order_idx),
+                        "nc": float(nc(wm, extracted)),
+                        "ber": float(ber(wm, extracted)),
+                    })
+
+        detail_df = pd.DataFrame(rows)
+        detail_path = output_dir / f"proposal_plot_detail_{wm_label}.csv"
+        detail_df[detail_df["watermark_name"] == wm_label].to_csv(detail_path, index=False)
+
+        wm_df = detail_df[detail_df["watermark_name"] == wm_label].copy()
+        host_order = [name for name, _ in resolved_hosts]
+
+        if str(plot_layout).lower() == "grid":
+            fig, axes = plt.subplots(3, 2, figsize=(12, 14))
+            axes_list = list(axes.flatten())
+            for ax, family in zip(axes_list, attack_families):
+                sub = wm_df[wm_df["attack_family"] == family["key"]].copy()
+                for host_name in host_order:
+                    host_sub = sub[sub["host_display_name"] == host_name].sort_values(["x_order", "x_value"])
+                    if host_sub.empty:
+                        continue
+                    ax.plot(host_sub["x_value"].to_numpy(), host_sub["nc"].to_numpy(), marker="o", linewidth=1.5, markersize=4, label=host_name)
+                ax.set_title(family["title"])
+                ax.set_xlabel(family["xlabel"])
+                ax.set_ylabel("NC (after attack)")
+                ax.set_ylim(float(y_min), float(y_max))
+                ax.grid(True, alpha=0.45)
+                ax.legend(loc="lower left", fontsize=8)
+                values = [float(v) for v in family["values"]]
+                ax.set_xticks(values)
+
+            fig.suptitle(f"Proposal method: NC under parameterized attacks ({wm_path.name})", fontsize=14)
+            fig.tight_layout(rect=[0, 0.03, 1, 0.98])
+            fig_path_png = output_dir / f"proposal_attack_sensitivity_{wm_label}.png"
+            fig_path_pdf = output_dir / f"proposal_attack_sensitivity_{wm_label}.pdf"
+            fig.savefig(fig_path_png, dpi=int(dpi), bbox_inches="tight")
+            fig.savefig(fig_path_pdf, dpi=int(dpi), bbox_inches="tight")
+            plt.close(fig)
+            print(f"Saved proposal sensitivity figure to: {fig_path_png}")
+        else:
+            for family in attack_families:
+                fig, ax = plt.subplots(figsize=(7.2, 5.4))
+                sub = wm_df[wm_df["attack_family"] == family["key"]].copy()
+                for host_name in host_order:
+                    host_sub = sub[sub["host_display_name"] == host_name].sort_values(["x_order", "x_value"])
+                    if host_sub.empty:
+                        continue
+                    ax.plot(host_sub["x_value"].to_numpy(), host_sub["nc"].to_numpy(), marker="o", linewidth=1.5, markersize=4, label=host_name)
+                ax.set_title(family["title"])
+                ax.set_xlabel(family["xlabel"])
+                ax.set_ylabel("NC (after attack)")
+                ax.set_ylim(float(y_min), float(y_max))
+                ax.grid(True, alpha=0.45)
+                ax.legend(loc="lower left", fontsize=8)
+                values = [float(v) for v in family["values"]]
+                # Dense parameter grids can overcrowd the x-axis. Show all ticks
+                # for short grids; otherwise show a readable subset while still
+                # plotting every measured value.
+                if len(values) <= 10:
+                    ax.set_xticks(values)
+                else:
+                    tick_idx = np.linspace(0, len(values) - 1, 8, dtype=int)
+                    ax.set_xticks([values[i] for i in tick_idx])
+                fig.tight_layout()
+                fig_path_png = output_dir / f"proposal_attack_sensitivity_{wm_label}_{family['key']}.png"
+                fig_path_pdf = output_dir / f"proposal_attack_sensitivity_{wm_label}_{family['key']}.pdf"
+                fig.savefig(fig_path_png, dpi=int(dpi), bbox_inches="tight")
+                fig.savefig(fig_path_pdf, dpi=int(dpi), bbox_inches="tight")
+                plt.close(fig)
+                print(f"Saved proposal sensitivity figure to: {fig_path_png}")
+    if rows:
+        all_detail_path = output_dir / "proposal_plot_detail_all_watermarks.csv"
+        pd.DataFrame(rows).to_csv(all_detail_path, index=False)
+        print(f"Saved proposal sensitivity detail CSV to: {all_detail_path}")
+    if summary_rows:
+        summary_path = output_dir / "proposal_plot_clean_summary.csv"
+        pd.DataFrame(summary_rows).to_csv(summary_path, index=False)
+        print(f"Saved proposal clean summary CSV to: {summary_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run the cleaned watermarking benchmark on 512x512 RGB host images and a 64x64 binary watermark.")
-    parser.add_argument("--phase", default="normal", choices=["normal", "optimize", "optimization"], help="normal: run benchmark; optimize: search proposal parameters and export them.")
+    parser.add_argument("--phase", default="normal", choices=["normal", "optimize", "optimization", "proposal-plot", "proposal_plot", "plot-proposal"], help="normal: run benchmark; optimize: search/export parameters; proposal-plot: generate 3x2 NC-vs-attack-parameter plots for the proposal method.")
     parser.add_argument("--host-dir", default="data/host")
     parser.add_argument("--watermark", default="data/watermark/wm.png")
     parser.add_argument("--output", default="results/common_benchmark")
@@ -879,6 +1169,18 @@ def main():
     parser.add_argument("--proposal-optimizer-alpha-decay", type=float, default=0.80)
     parser.add_argument("--proposal-optimizer-seed", type=int, default=123)
     parser.add_argument("--proposal-repeat", default="full", help="Default full/faithful uses all source-script structured repetition; use an integer such as 3 only for quick practical runs.")
+    parser.add_argument("--plot-watermarks", default="", help="Optional comma-separated watermark files or folders for proposal-plot phase. Empty uses --watermark only.")
+    parser.add_argument("--proposal-plot-hosts", default="airplane.bmp,Girl.bmp,house.bmp,milkdrop.bmp,safari.bmp,tiffany.bmp", help="Comma-separated host-image names for proposal-plot phase.")
+    parser.add_argument("--proposal-plot-jpeg-values", default="100,95,90,85,80,75,70,65,60,55,50,45,40,35,30,25,20")
+    parser.add_argument("--proposal-plot-salt-pepper-values", default="0.005,0.01,0.015,0.02,0.025,0.03,0.035,0.04,0.045,0.05,0.075,0.10,0.125,0.15,0.175,0.20,0.25,0.30")
+    parser.add_argument("--proposal-plot-median-sizes", default="3,5,7,9,11,13,15")
+    parser.add_argument("--proposal-plot-resize-values", default="0.25,0.33,0.40,0.50,0.60,0.75,0.90,1.00,1.10,1.25,1.50,1.75,2.00,2.50,3.00,4.00")
+    parser.add_argument("--proposal-plot-jpeg2000-values", default="1,2,3,4,5,6,7,8,10,12,13,15,18,20,25,30")
+    parser.add_argument("--proposal-plot-rotate-values", default="1,2,3,5,7,10,12,15,20,25,30,35,40,45,60,75,90")
+    parser.add_argument("--proposal-plot-ymin", type=float, default=0.70)
+    parser.add_argument("--proposal-plot-ymax", type=float, default=1.00)
+    parser.add_argument("--proposal-plot-dpi", type=int, default=180)
+    parser.add_argument("--proposal-plot-layout", default="single", choices=["single", "grid"], help="single: save one figure per attack family; grid: save one 3x2 combined figure.")
 
     args = parser.parse_args()
     fireflies = int(args.proposal_optimizer_fireflies if args.proposal_optimizer_fireflies is not None else args.proposal_optimizer_trials)
@@ -1007,6 +1309,30 @@ def main():
         "key_strength": float(args.gaata_key_strength),
         "optimized_payload": gaata_optimized_payload,
     }
+
+    if args.phase in {"proposal-plot", "proposal_plot", "plot-proposal"}:
+        proposal_plot_watermarks = _resolve_proposal_plot_watermarks(args.watermark, args.plot_watermarks)
+        proposal_plot_hosts = [s.strip() for s in str(args.proposal_plot_hosts).split(",") if s.strip()]
+        run_proposal_plot_phase(
+            host_dir=args.host_dir,
+            watermark_path=args.watermark,
+            output_dir=args.output,
+            invert_watermark=args.invert_watermark,
+            host_names=proposal_plot_hosts,
+            watermark_paths=proposal_plot_watermarks,
+            proposal_options=proposal_options,
+            y_min=float(args.proposal_plot_ymin),
+            y_max=float(args.proposal_plot_ymax),
+            dpi=int(args.proposal_plot_dpi),
+            jpeg_values=_parse_csv_values(args.proposal_plot_jpeg_values, int),
+            salt_pepper_values=_parse_csv_values(args.proposal_plot_salt_pepper_values, float),
+            median_sizes=_parse_csv_values(args.proposal_plot_median_sizes, int),
+            resize_values=_parse_csv_values(args.proposal_plot_resize_values, float),
+            jpeg2000_values=_parse_csv_values(args.proposal_plot_jpeg2000_values, float),
+            rotate_values=_parse_csv_values(args.proposal_plot_rotate_values, float),
+            plot_layout=str(args.proposal_plot_layout),
+        )
+        return
 
     result = run_benchmark(
         host_dir=args.host_dir,
