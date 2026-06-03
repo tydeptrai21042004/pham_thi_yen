@@ -36,7 +36,9 @@ class Gaata2022DWTHessFWA:
 
     Reproduction modes:
         adapt:
-            Fast common-benchmark mode. It keeps the package runnable for all baselines.
+            Common-benchmark mode. It uses the paper's selected decimal digit after
+            the floating point (decimal_position=3) but does not run FWA unless
+            optimized key parameters are loaded from a separate optimization phase.
         original-rerun:
             Paper-faithful local rerun mode for this baseline. It switches on the
             decimal-digit Hessenberg rule, uses stronger chaotic keys, and runs the
@@ -49,7 +51,7 @@ class Gaata2022DWTHessFWA:
         self,
         block_size: int = 4,
         h_position: tuple[int, int] = (3, 3),
-        decimal_position: int = -1,
+        decimal_position: int = 3,
         key_strength: float = 0.020,
         key_params: tuple[float, float, float, float] = (0.21, 0.37, 4.90, 0.18),
         use_fwa: bool = False,
