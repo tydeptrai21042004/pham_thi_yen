@@ -3,7 +3,7 @@ from typing import Any
 from pathlib import Path
 import pandas as pd
 
-BASELINE_IDS = {"kumar2021", "guo2017_dwt_qr_fa", "gaata2022_dwt_hess_fwa", "dwt_hd_svd_2025", "hess_nha2023", "roy2018_dwt_svd"}
+BASELINE_IDS = {"kumar2021", "guo2017_dwt_qr_fa", "gaata2022_dwt_hess_fwa", "dwt_hd_svd_2025", "hess_nha2023", "roy2018_dwt_svd", "dwt_wht_svd_2024", "qwt_qsvd_zhang2022_blind", "qwt_qsvd_zhang2022_semiblind"}
 
 def _r(method_id: str, paper: str, table: str, phase: str, image: str, attack: str, metric: str, value: Any, unit: str = "", note: str = ""):
     return {"method_id": method_id, "paper": paper, "table": table, "mode": "original_reported", "phase": phase, "image": image, "attack": attack, "metric": metric, "value": value, "unit": unit, "note": note}
@@ -128,6 +128,27 @@ def paper_reported_rows(method_ids: list[str] | None = None) -> list[dict[str, A
         }
         for attack, vals in ncc.items():
             rows.append(_r("dwt_hd_svd_2025", p, "Table 4 mean", "after_attack", "Average", attack, "NCC_watermark", round(_mean(vals), 6)))
+
+    if "dwt_wht_svd_2024" in ids:
+        p = "Kumar et al. 2024 DWT-WHT-SVD"
+        rows += [
+            _r("dwt_wht_svd_2024", p, "Abstract", "before_attack", "Average", "no_attack", "PSNR", 40.0876, "dB"),
+            _r("dwt_wht_svd_2024", p, "Abstract", "before_attack", "Average", "no_attack", "SSIM", 0.9883),
+            _r("dwt_wht_svd_2024", p, "Section 3", "metadata", "All", "cover", "cover_size", "512x512 color"),
+            _r("dwt_wht_svd_2024", p, "Section 3", "metadata", "All", "watermark", "watermark_size", "64x64 grayscale"),
+            _r("dwt_wht_svd_2024", p, "Equations 3 and extraction", "metadata", "All", "side_information", "side_information", "HPC,UW,VW,alpha", note="Semi-blind extraction; local implementation preserves this contract."),
+        ]
+    if "qwt_qsvd_zhang2022_blind" in ids or "qwt_qsvd_zhang2022_semiblind" in ids:
+        p = "Zhang et al. 2022 QWT-QSVD"
+        for mid, label in [("qwt_qsvd_zhang2022_blind", "blind"), ("qwt_qsvd_zhang2022_semiblind", "semi-blind")]:
+            if mid in ids:
+                rows += [
+                    _r(mid, p, "Abstract", "metadata", "All", "cover", "cover_type", "color image"),
+                    _r(mid, p, "Abstract", "metadata", "All", "embedding", "domain", "YCbCr-Y + QWT-QSVD"),
+                    _r(mid, p, "Abstract", "metadata", "All", "blocks", "block_size", "4x4"),
+                    _r(mid, p, "Abstract", "metadata", "All", "extraction", "extraction_type", label),
+                    _r(mid, p, "Section 4 comparison", "before_attack", "Average", "no_attack", "PSNR", 39.88, "dB", note="Approximate reported value for blind variant in comparison table; use local benchmark for exact unified numbers."),
+                ]
     return rows
 
 def paper_reported_dataframe(method_ids: list[str] | None = None) -> pd.DataFrame:

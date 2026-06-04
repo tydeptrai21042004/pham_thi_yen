@@ -42,3 +42,26 @@ Do not mix these in one table without labels:
 ## Roy 2018 DWT-SVD side-information baseline
 
 Method id: `roy2018_dwt_svd`. This baseline follows Roy and Pal's YCbCr-Y blockwise DWT-SVD procedure: 512x512 RGB host images are converted to YCbCr, the Y channel is divided into 32x32 blocks, a three-level Haar DWT is applied to each block, and 4x4 watermark blocks are embedded into the singular-value matrix with `alpha=0.02`. Extraction stores and reuses `Sp`, `UWp`, and `VWp` from the embedding phase, so the method is a side-information baseline rather than a fully blind method.
+
+## Added baselines: DWT-WHT-SVD2024 and Zhang2022 QWT-QSVD
+
+### `dwt_wht_svd_2024`
+
+- Paper: entropy-based adaptive DWT-WHT-SVD color watermarking in YCbCr space.
+- Host/payload compatibility: native 512x512 color host and 64x64 watermark.
+- Local payload: binary 64x64 watermark is used as a grayscale `{0,255}` watermark, preserving 4096 payload symbols.
+- Extraction type: semi-blind, matching the original paper. The key stores `HPC`, `UW`, `VW^T`, adaptive `alpha`, and Arnold parameters.
+- Main table placement: semi-blind / side-information table.
+
+### `qwt_qsvd_zhang2022_blind`
+
+- Paper: robust image watermarking based on QWT and QSVD using 2D Chebyshev-Logistic map.
+- Host/payload compatibility: color host is converted to YCbCr; low-frequency QWT/Q1 domain is split into 4x4 blocks. For a 512x512 host this gives 4096 blocks, exactly matching a 64x64 binary watermark.
+- Extraction type: blind.
+- Main table placement: fair blind table.
+
+### `qwt_qsvd_zhang2022_semiblind`
+
+- Same embedding structure as `qwt_qsvd_zhang2022_blind`.
+- Extraction type: semi-blind, preserving the paper's second extraction mode using selector information.
+- Main table placement: semi-blind / side-information table.

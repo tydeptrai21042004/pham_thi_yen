@@ -7,6 +7,8 @@ from watermarklab.methods.gaata2022_dwt_hess_fwa import Gaata2022DWTHessFWA
 from watermarklab.methods.dwt_hd_svd2025 import DWTHDSVD2025
 from watermarklab.methods.hess_nha2023 import HessNha2023Hessenberg
 from watermarklab.methods.roy2018_dwt_svd import Roy2018DWTSVD
+from watermarklab.methods.dwt_wht_svd2024 import DWTWHTSVD2024
+from watermarklab.methods.qwt_qsvd_zhang2022 import QWTQSVDZhang2022
 from watermarklab.methods.proposal_qh_dwt_hess import ProposalQHDWTHess, ProposalParams
 
 BASELINE_METHOD_IDS = [
@@ -16,6 +18,9 @@ BASELINE_METHOD_IDS = [
     "dwt_hd_svd_2025",
     "hess_nha2023",
     "roy2018_dwt_svd",
+    "dwt_wht_svd_2024",
+    "qwt_qsvd_zhang2022_blind",
+    "qwt_qsvd_zhang2022_semiblind",
 ]
 DEFAULT_METHOD_IDS = BASELINE_METHOD_IDS + ["proposal"]
 
@@ -45,6 +50,9 @@ def build_methods(
         "dwt_hd_svd_2025": DWTHDSVD2025(mode=baseline_modes.get("dwt_hd_svd_2025", "adapt")),
         "hess_nha2023": HessNha2023Hessenberg(mode=baseline_modes.get("hess_nha2023", "adapt")),
         "roy2018_dwt_svd": Roy2018DWTSVD(mode=baseline_modes.get("roy2018_dwt_svd", "adapt")),
+        "dwt_wht_svd_2024": DWTWHTSVD2024(mode=baseline_modes.get("dwt_wht_svd_2024", "adapt")),
+        "qwt_qsvd_zhang2022_blind": QWTQSVDZhang2022(mode=baseline_modes.get("qwt_qsvd_zhang2022_blind", "adapt"), extraction_mode="blind"),
+        "qwt_qsvd_zhang2022_semiblind": QWTQSVDZhang2022(mode=baseline_modes.get("qwt_qsvd_zhang2022_semiblind", "adapt"), extraction_mode="semi-blind"),
         "proposal": ProposalQHDWTHess(params=proposal_params, **proposal_options),
     }
 
@@ -67,6 +75,8 @@ __all__ = [
     "DWTHDSVD2025",
     "HessNha2023Hessenberg",
     "Roy2018DWTSVD",
+    "DWTWHTSVD2024",
+    "QWTQSVDZhang2022",
     "ProposalQHDWTHess",
     "ProposalParams",
     "BASELINE_METHOD_IDS",
