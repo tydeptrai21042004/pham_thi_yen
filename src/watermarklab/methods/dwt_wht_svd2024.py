@@ -122,7 +122,7 @@ class DWTWHTSVD2024:
         uw, sw, vwt = np.linalg.svd(embedded_pc, full_matrices=True)
         sw_diag = diag_from_s(sw, embedded_pc.shape)
 
-        marked_coeff = uw @ sw_diag @ vt
+        marked_coeff = uw @ sw_diag @ vwt
         marked_hh3 = iwht2(marked_coeff)
         marked_y = self._idwt_hh3(marked_hh3, saved)
         watermarked_rgb = ycbcr_to_rgb(marked_y, cb, cr)
