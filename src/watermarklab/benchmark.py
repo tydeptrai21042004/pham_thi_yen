@@ -365,6 +365,8 @@ def run_benchmark(
                     key_info["gaata_decimal_position"] = int(method.config.decimal_position)
                     key_info["gaata_key_strength"] = float(method.config.key_strength)
                     key_info["gaata_key_params"] = json.dumps(list(method.config.key_params))
+                    key_info["gaata_embedding_rule"] = str(getattr(method.config, "embedding_rule", "decimal"))
+                    key_info["gaata_qim_step"] = float(getattr(method.config, "qim_step", 16.0))
                     key_info["gaata_use_fwa_inline"] = bool(method.use_fwa)
                 if method_id == "guo2017_dwt_qr_fa" and isinstance(method, Guo2017DWTQRFA):
                     key_info["guo_param_source"] = guo_param_source
@@ -733,6 +735,8 @@ def run_gaata_optimization_phase(
     mode: str = "adapt",
     decimal_position: int = 3,
     key_strength: float = 0.020,
+    embedding_rule: str | None = None,
+    qim_step: float = 16.0,
     population_size: int = 8,
     iterations: int = 3,
     sparks_per_firework: int = 3,
@@ -755,7 +759,13 @@ def run_gaata_optimization_phase(
     # Build the same base configuration as the selected local mode, then force the
     # paper decimal digit in adapt mode. This separates expensive FWA from the
     # normal benchmark run.
-    base_method = Gaata2022DWTHessFWA(mode=mode, decimal_position=decimal_position, key_strength=key_strength)
+    base_method = Gaata2022DWTHessFWA(
+        mode=mode,
+        decimal_position=decimal_position,
+        key_strength=key_strength,
+        embedding_rule=embedding_rule,
+        qim_step=qim_step,
+    )
     base_config = base_method.config
 
     per_image: dict[str, Any] = {}
@@ -807,6 +817,8 @@ def run_gaata_optimization_phase(
         "watermark_path": str(watermark_path),
         "mode": str(mode),
         "param_names": ["x0", "y0", "r", "b"],
+        "embedding_rule": str(getattr(base_config, "embedding_rule", "decimal")),
+        "qim_step": float(getattr(base_config, "qim_step", 16.0)),
         "global_best": global_best,
         "per_image": per_image,
     }
@@ -1155,6 +1167,8 @@ def main():
     parser.add_argument("--gaata-optimizer-seed", type=int, default=2022)
     parser.add_argument("--gaata-key-strength", type=float, default=0.020)
     parser.add_argument("--gaata-decimal-position", type=int, default=3, help="Paper decimal digit after the floating point; default 3.")
+    parser.add_argument("--gaata-embedding-rule", default="auto", choices=["auto", "decimal", "qim"], help="auto: qim for adapt mode, decimal for original-rerun; decimal: paper-style selected decimal digit; qim: uint8-safe adapted rule.")
+    parser.add_argument("--gaata-qim-step", type=float, default=16.0, help="Quantization step for Gaata's uint8-safe adapted QIM rule.")
 
     parser.add_argument("--proposal-param-file", default=DEFAULT_PROPOSAL_PARAM_FILE, help="JSON/CSV file written by optimization phase. Normal phase loads it automatically when it exists.")
     parser.add_argument("--proposal-param-mode", default="auto", choices=["auto", "ignore", "require"], help="auto: use param file if present; ignore: always defaults; require: fail if missing.")
@@ -1225,6 +1239,8 @@ def main():
                 mode=args.baseline_mode if args.gaata_mode == "inherit" else args.gaata_mode,
                 decimal_position=int(args.gaata_decimal_position),
                 key_strength=float(args.gaata_key_strength),
+                embedding_rule=None if str(args.gaata_embedding_rule).lower() == "auto" else str(args.gaata_embedding_rule).lower(),
+                qim_step=float(args.gaata_qim_step),
                 population_size=int(args.gaata_optimizer_population),
                 iterations=int(args.gaata_optimizer_iterations),
                 sparks_per_firework=int(args.gaata_optimizer_sparks),
@@ -1304,9 +1320,12 @@ def main():
         "k_mode": "paper_integral",
         "optimized_payload": guo_optimized_payload,
     }
+    gaata_embedding_rule = None if str(args.gaata_embedding_rule).lower() == "auto" else str(args.gaata_embedding_rule).lower()
     gaata_options = {
         "decimal_position": int(args.gaata_decimal_position),
         "key_strength": float(args.gaata_key_strength),
+        "embedding_rule": gaata_embedding_rule,
+        "qim_step": float(args.gaata_qim_step),
         "optimized_payload": gaata_optimized_payload,
     }
 

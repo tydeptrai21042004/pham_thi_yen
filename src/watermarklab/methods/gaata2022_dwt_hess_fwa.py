@@ -36,8 +36,9 @@ class Gaata2022DWTHessFWA:
 
     Reproduction modes:
         adapt:
-            Common-benchmark mode. It uses the paper's selected decimal digit after
-            the floating point (decimal_position=3) but does not run FWA unless
+            Common-benchmark mode. It keeps the same RGB-DWT-Hessenberg block
+            path but uses a quantization-aware parity rule so the watermark
+            survives standard uint8 reconstruction. It does not run FWA unless
             optimized key parameters are loaded from a separate optimization phase.
         original-rerun:
             Paper-faithful local rerun mode for this baseline. It switches on the
@@ -53,6 +54,8 @@ class Gaata2022DWTHessFWA:
         h_position: tuple[int, int] = (3, 3),
         decimal_position: int = 3,
         key_strength: float = 0.020,
+        embedding_rule: str | None = None,
+        qim_step: float = 16.0,
         key_params: tuple[float, float, float, float] = (0.21, 0.37, 4.90, 0.18),
         use_fwa: bool = False,
         fwa_population: int = 6,
@@ -62,6 +65,11 @@ class Gaata2022DWTHessFWA:
         mode: str = "adapt",
     ):
         self.mode = str(mode)
+        if embedding_rule is None:
+            # The paper-style decimal rule is preserved for original-rerun.
+            # Adapted benchmark mode uses QIM because the decimal rule is lost
+            # after RGB reconstruction + uint8 rounding.
+            embedding_rule = "decimal" if self.mode == "original-rerun" else "qim"
 
         if self.mode == "original-rerun":
             # Paper-faithful correction requested by the user:
@@ -76,6 +84,7 @@ class Gaata2022DWTHessFWA:
             # a caller to pass a larger value.
             decimal_position = 3
             key_strength = 1.0
+            embedding_rule = "decimal"
             use_fwa = True
             fwa_population = max(int(fwa_population), 100)
             fwa_iterations = max(int(fwa_iterations), 10)
@@ -88,6 +97,8 @@ class Gaata2022DWTHessFWA:
             key_strength=float(key_strength),
             key_params=tuple(float(x) for x in key_params),
             clip_output=True,
+            embedding_rule=str(embedding_rule),
+            qim_step=float(qim_step),
         )
         self.use_fwa = bool(use_fwa)
         self.fwa_population = int(fwa_population)

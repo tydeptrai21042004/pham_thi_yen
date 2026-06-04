@@ -18,11 +18,13 @@ def test_four_requested_baselines_clean_smoke():
         assert watermarked.shape == host.shape, method_id
         assert extracted.shape == wm.shape, method_id
         assert psnr(host, watermarked) > 30.0, method_id
-        # Gaata's paper-style decimal/parity rule (digit after the floating point)
-        # is highly sensitive to uint8 image rounding, so this smoke test verifies
-        # pipeline validity for Gaata and strict clean BER for the other baselines.
+        # Gaata adapt mode now uses a quantization-aware Hessenberg parity rule
+        # so the watermark survives the same uint8 reconstruction pipeline as the
+        # other local baselines.
         if method_id == "gaata2022_dwt_hess_fwa":
             assert getattr(method.config, "decimal_position") == 3
+            assert getattr(method.config, "embedding_rule") == "qim"
+            assert ber(wm, extracted) < 0.02, method_id
         else:
             assert ber(wm, extracted) < (0.03 if method_id == "roy2018_dwt_svd" else 0.02), method_id
 

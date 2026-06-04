@@ -37,6 +37,11 @@ class WatermarkConfig:
     key_params: Tuple[float, float, float, float] = (0.21, 0.37, 4.90, 0.18)
     use_min_shift: bool = True
     clip_output: bool = True
+    # ``decimal`` keeps the paper-style selected-decimal-digit parity rule.
+    # ``qim`` is the adapted uint8-safe rule: the selected Hessenberg
+    # coefficient is quantized with a larger step before parity is read.
+    embedding_rule: str = "decimal"
+    qim_step: float = 16.0
 
     def to_json(self) -> str:
         d = asdict(self)
@@ -156,6 +161,42 @@ def _desired_parity_ok(value: float, bit: int, decimal_position: int) -> bool:
     return (_decimal_digit(value, decimal_position) % 2) == int(bit)
 
 
+def _qim_index(value: float, step: float) -> int:
+    if step <= 0:
+        raise ValueError("qim_step must be positive")
+    return int(np.rint(float(value) / float(step)))
+
+
+def _qim_bit(value: float, step: float) -> int:
+    # Python's modulo is stable for negative indices too: -1 % 2 == 1.
+    return _qim_index(value, step) % 2
+
+
+def _desired_qim_ok(value: float, bit: int, step: float) -> bool:
+    return _qim_bit(value, step) == int(bit)
+
+
+def _nearest_qim_values(value: float, bit: int, step: float, search_radius: int = 2) -> list[float]:
+    """Candidate coefficient values for quantization-index parity embedding.
+
+    The candidates are centered around the current quantization index, ordered
+    by absolute modification size.  Only indices with the desired parity are
+    returned.
+    """
+    base = _qim_index(value, step)
+    candidates: list[float] = []
+    for offset in range(-search_radius, search_radius + 1):
+        idx = base + offset
+        if idx % 2 == int(bit):
+            candidates.append(float(idx) * float(step))
+    if not candidates:
+        # Defensive fallback; should never happen for radius >= 1.
+        idx = base if base % 2 == int(bit) else base + 1
+        candidates.append(float(idx) * float(step))
+    candidates.sort(key=lambda v: abs(v - float(value)))
+    return candidates
+
+
 def _force_parity(value: float, bit: int, decimal_position: int) -> float:
     """Change one decimal digit by +/-1 unit at the chosen decimal position."""
     if _desired_parity_ok(value, bit, decimal_position):
@@ -185,16 +226,12 @@ def capacity_bits_for_em(shape: Tuple[int, int], block_size: int) -> int:
     return (shape[0] // block_size) * (shape[1] // block_size)
 
 
-def embed_bits_in_em(em_keyed: np.ndarray, bits: np.ndarray, config: WatermarkConfig) -> tuple[np.ndarray, int]:
-    """Apply Hessenberg block embedding to a keyed embedding matrix.
+def _embed_bits_in_em_decimal(em_keyed: np.ndarray, bits: np.ndarray, config: WatermarkConfig) -> tuple[np.ndarray, int]:
+    """Paper-style selected-decimal-digit parity embedding.
 
-    A practical detail is included for numerical reproducibility: after a block
-    is reconstructed as Q @ H @ Q.T, SciPy's Hessenberg factorization of that
-    reconstructed block may choose slightly different signs in Q.  Therefore the
-    implementation verifies the parity after re-factorization and, if needed,
-    tries a few one-digit increments until the extraction rule reads the desired
-    bit.  This keeps the observable extraction rule identical to the paper while
-    making the tests deterministic.
+    This is kept for original-rerun experiments. It is not safe for the unified
+    uint8 benchmark because a 0.001 coefficient edit can disappear after image
+    rounding.
     """
     out = np.array(em_keyed, dtype=np.float64, copy=True)
     flat_bits = np.asarray(bits, dtype=np.uint8).ravel()
@@ -214,8 +251,6 @@ def embed_bits_in_em(em_keyed: np.ndarray, bits: np.ndarray, config: WatermarkCo
         block = out[rs, cs]
         H, Q = hessenberg(block, calc_q=True)
 
-        # If extraction from this block already gives the desired bit, leave it
-        # unchanged exactly as the paper describes.
         if _desired_parity_ok(H[pos], bit, config.decimal_position):
             continue
 
@@ -226,8 +261,6 @@ def embed_bits_in_em(em_keyed: np.ndarray, bits: np.ndarray, config: WatermarkCo
         best_block = None
         best_error = float("inf")
 
-        # Try one-decimal-digit edits, starting with the direction prescribed by
-        # the article.  The loop is rarely longer than one or two steps.
         for direction in directions:
             for k in range(1, 41):
                 H_try = H.copy()
@@ -242,8 +275,6 @@ def embed_bits_in_em(em_keyed: np.ndarray, bits: np.ndarray, config: WatermarkCo
                     break
 
         if best_block is None:
-            # Last-resort fallback: direct paper edit. This should not normally
-            # happen, but keeps the function total for pathological matrices.
             H[pos] = _force_parity(old_value, bit, config.decimal_position)
             best_block = Q @ H @ Q.T
 
@@ -252,14 +283,99 @@ def embed_bits_in_em(em_keyed: np.ndarray, bits: np.ndarray, config: WatermarkCo
     return out, changed_blocks
 
 
+def _embed_bits_in_em_qim(em_keyed: np.ndarray, bits: np.ndarray, config: WatermarkConfig) -> tuple[np.ndarray, int]:
+    """Adapted uint8-safe parity embedding for Gaata 2022.
+
+    Instead of modifying only one decimal digit (usually 0.001), this rule uses
+    quantization-index parity with ``qim_step``.  The algorithm still embeds one
+    bit in the selected Hessenberg H coefficient of each 4x4 block, but the
+    coefficient change is large enough to survive RGB reconstruction and uint8
+    rounding in the common benchmark.
+    """
+    out = np.array(em_keyed, dtype=np.float64, copy=True)
+    flat_bits = np.asarray(bits, dtype=np.uint8).ravel()
+    b = config.block_size
+    pos = config.h_position
+    changed_blocks = 0
+    step = float(config.qim_step)
+
+    if pos[0] >= b or pos[1] >= b:
+        raise ValueError("h_position must lie inside the block")
+    if len(flat_bits) > capacity_bits_for_em(out.shape, b):
+        raise ValueError("watermark too large for cover image and block size")
+    if step <= 0:
+        raise ValueError("qim_step must be positive")
+
+    for idx, rs, cs in _iter_block_slices(out.shape, b, len(flat_bits)):
+        bit = int(flat_bits[idx])
+        block = out[rs, cs]
+        H, Q = hessenberg(block, calc_q=True)
+
+        if _desired_qim_ok(H[pos], bit, step):
+            continue
+
+        old_value = float(H[pos])
+        best_block = None
+        best_error = float("inf")
+
+        # A small radius is enough because QIM moves to the nearest coefficient
+        # grid with the desired parity.  Re-factorization is still checked to
+        # avoid SciPy Hessenberg sign/rounding ambiguity.
+        for new_value in _nearest_qim_values(old_value, bit, step, search_radius=2):
+            H_try = H.copy()
+            H_try[pos] = new_value
+            candidate = Q @ H_try @ Q.T
+            H_check, _ = hessenberg(candidate, calc_q=True)
+            if _desired_qim_ok(H_check[pos], bit, step):
+                err = float(np.linalg.norm(candidate - block))
+                if err < best_error:
+                    best_error = err
+                    best_block = candidate
+
+        if best_block is None:
+            # Last-resort deterministic fallback: move by one full quantization
+            # step in the nearest direction that gives the requested bit.
+            idx0 = _qim_index(old_value, step)
+            target_idx = idx0 if idx0 % 2 == bit else idx0 + 1
+            H[pos] = float(target_idx) * step
+            best_block = Q @ H @ Q.T
+
+        changed_blocks += 1
+        out[rs, cs] = best_block
+    return out, changed_blocks
+
+
+def embed_bits_in_em(em_keyed: np.ndarray, bits: np.ndarray, config: WatermarkConfig) -> tuple[np.ndarray, int]:
+    """Apply Hessenberg block embedding to a keyed embedding matrix.
+
+    ``embedding_rule='decimal'`` keeps the paper-style selected decimal-digit
+    parity rule. ``embedding_rule='qim'`` is the corrected adapted rule used for
+    the uint8 benchmark.
+    """
+    rule = str(getattr(config, "embedding_rule", "decimal")).lower()
+    if rule in {"decimal", "paper", "paper_decimal"}:
+        return _embed_bits_in_em_decimal(em_keyed, bits, config)
+    if rule in {"qim", "uint8", "uint8_safe", "quantization", "quantization_aware"}:
+        return _embed_bits_in_em_qim(em_keyed, bits, config)
+    raise ValueError(f"Unknown Gaata embedding_rule: {config.embedding_rule!r}")
+
+
 def extract_bits_from_em(em_keyed: np.ndarray, num_bits: int, config: WatermarkConfig) -> np.ndarray:
     bits = np.empty(num_bits, dtype=np.uint8)
     b = config.block_size
     pos = config.h_position
+    rule = str(getattr(config, "embedding_rule", "decimal")).lower()
+    step = float(getattr(config, "qim_step", 16.0))
+
     for idx, rs, cs in _iter_block_slices(em_keyed.shape, b, num_bits):
         block = em_keyed[rs, cs]
         H, _ = hessenberg(block, calc_q=True)
-        bits[idx] = _decimal_digit(H[pos], config.decimal_position) % 2
+        if rule in {"decimal", "paper", "paper_decimal"}:
+            bits[idx] = _decimal_digit(H[pos], config.decimal_position) % 2
+        elif rule in {"qim", "uint8", "uint8_safe", "quantization", "quantization_aware"}:
+            bits[idx] = _qim_bit(H[pos], step)
+        else:
+            raise ValueError(f"Unknown Gaata embedding_rule: {config.embedding_rule!r}")
     return bits
 
 
