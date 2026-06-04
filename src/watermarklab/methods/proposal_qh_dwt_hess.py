@@ -131,6 +131,16 @@ class ProposalParams:
     host_channels: tuple[int, ...] = HOST_CHANNELS
     structured_repetition_enabled: bool = USE_STRUCTURED_REPETITION
 
+    # Ablation-only switches. Defaults keep the full proposal unchanged.
+    # q4/hpos_enabled isolate the two Hessenberg embedding branches.
+    # arnold_enabled tests the contribution of spatial scrambling.
+    # candidate_selection_mode tests how BSS/MSE candidate selection affects results.
+    ablation_name: str = "full"
+    q4_enabled: bool = True
+    hpos_enabled: bool = True
+    arnold_enabled: bool = True
+    candidate_selection_mode: str = "bss_mse"
+
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ProposalParams":
         """Create params from package-style or source-script-style dictionaries.
@@ -349,45 +359,74 @@ def prepare_binary_watermark_payload_from_array(
     wm_binary = _force_binary_watermark_exact(watermark_binary, WM_SIZE, WM_BIN_THRESH)
     wm_bits_2d = (wm_binary >= WM_BIN_THRESH).astype(np.float64)
 
-    # Same as pywt.dwt2(wm_bits_2d, 'haar') -> LL, (LH, HL, HH)
-    bands = _dwt_split_4bands(wm_bits_2d, params)
-    LL, LH, HL, HH = bands["LL"], bands["LH"], bands["HL"], bands["HH"]
+    # Full proposal: embed only the LL subband of the watermark DWT and preserve
+    # the detail subbands in the key. Ablation can disable this to embed the full
+    # binary watermark payload directly.
+    if bool(params.watermark_dwt_enabled):
+        bands = _dwt_split_4bands(wm_bits_2d, params)
+        LL, LH, HL, HH = bands["LL"], bands["LH"], bands["HL"], bands["HH"]
 
-    ll_threshold = 1.0
-    ll_bits_2d = (LL >= ll_threshold).astype(np.uint8)
+        ll_threshold = 1.0
+        ll_bits_2d = (LL >= ll_threshold).astype(np.uint8)
 
-    low_vals = LL[LL < ll_threshold]
-    high_vals = LL[LL >= ll_threshold]
-    ll_low_value = float(np.mean(low_vals)) if low_vals.size > 0 else 0.0
-    ll_high_value = float(np.mean(high_vals)) if high_vals.size > 0 else 2.0
+        low_vals = LL[LL < ll_threshold]
+        high_vals = LL[LL >= ll_threshold]
+        ll_low_value = float(np.mean(low_vals)) if low_vals.size > 0 else 0.0
+        ll_high_value = float(np.mean(high_vals)) if high_vals.size > 0 else 2.0
 
-    scrambled_bits_2d = arnold_scramble(ll_bits_2d, int(params.arnold_iterations))
-    payload_bits = scrambled_bits_2d.reshape(-1).astype(np.uint8)
+        if bool(params.arnold_enabled):
+            scrambled_bits_2d = arnold_scramble(ll_bits_2d, int(params.arnold_iterations))
+        else:
+            scrambled_bits_2d = ll_bits_2d.astype(np.uint8)
+        payload_bits = scrambled_bits_2d.reshape(-1).astype(np.uint8)
 
+        meta = {
+            "wm_shape": tuple(int(x) for x in wm_binary.shape),
+            "wm_size": int(WM_SIZE),
+            "original_wm_bit_len": int(wm_bits_2d.size),
+            "wm_bit_len": int(ll_bits_2d.size),
+            "payload_len": int(payload_bits.size),
+            "payload_shape": tuple(int(x) for x in ll_bits_2d.shape),
+            "arnold_enabled": bool(params.arnold_enabled),
+            "arnold_iterations": int(params.arnold_iterations if params.arnold_enabled else 0),
+            "watermark_dwt_enabled": True,
+            "watermark_dwt_wavelet": DWT_WAVELET,
+            "watermark_dwt_level": 1,
+            "watermark_payload_band": "LL",
+            "watermark_ll_threshold": float(ll_threshold),
+            "watermark_ll_low_value": float(ll_low_value),
+            "watermark_ll_high_value": float(ll_high_value),
+            "watermark_detail_subbands": {
+                "LH": LH.astype(float).tolist(),
+                "HL": HL.astype(float).tolist(),
+                "HH": HH.astype(float).tolist(),
+            },
+        }
+        return wm_binary, payload_bits, meta
+
+    # Ablation path: no watermark DWT compression. Embed all 64x64 watermark bits
+    # directly. This increases payload length and reduces repetition capacity.
+    direct_bits_2d = wm_bits_2d.astype(np.uint8)
+    if bool(params.arnold_enabled):
+        payload_2d = arnold_scramble(direct_bits_2d, int(params.arnold_iterations))
+    else:
+        payload_2d = direct_bits_2d
+    payload_bits = payload_2d.reshape(-1).astype(np.uint8)
     meta = {
         "wm_shape": tuple(int(x) for x in wm_binary.shape),
         "wm_size": int(WM_SIZE),
         "original_wm_bit_len": int(wm_bits_2d.size),
-        "wm_bit_len": int(ll_bits_2d.size),
+        "wm_bit_len": int(wm_bits_2d.size),
         "payload_len": int(payload_bits.size),
-        "payload_shape": tuple(int(x) for x in ll_bits_2d.shape),
-        "arnold_enabled": True,
-        "arnold_iterations": int(params.arnold_iterations),
-        "watermark_dwt_enabled": True,
-        "watermark_dwt_wavelet": DWT_WAVELET,
-        "watermark_dwt_level": 1,
-        "watermark_payload_band": "LL",
-        "watermark_ll_threshold": float(ll_threshold),
-        "watermark_ll_low_value": float(ll_low_value),
-        "watermark_ll_high_value": float(ll_high_value),
-        "watermark_detail_subbands": {
-            "LH": LH.astype(float).tolist(),
-            "HL": HL.astype(float).tolist(),
-            "HH": HH.astype(float).tolist(),
-        },
+        "payload_shape": tuple(int(x) for x in wm_bits_2d.shape),
+        "arnold_enabled": bool(params.arnold_enabled),
+        "arnold_iterations": int(params.arnold_iterations if params.arnold_enabled else 0),
+        "watermark_dwt_enabled": False,
+        "watermark_dwt_wavelet": None,
+        "watermark_dwt_level": 0,
+        "watermark_payload_band": "direct_binary",
     }
     return wm_binary, payload_bits, meta
-
 
 def reconstruct_binary_watermark_from_payload_bits(payload_bits, meta: dict, params: ProposalParams):
     arnold_iterations = int(meta.get("arnold_iterations", params.arnold_iterations))
@@ -405,7 +444,10 @@ def reconstruct_binary_watermark_from_payload_bits(payload_bits, meta: dict, par
             bits_scrambled = bits_scrambled[:payload_len]
 
         scrambled_2d = bits_scrambled.reshape(payload_shape).astype(np.uint8)
-        recovered_ll_bits = arnold_unscramble(scrambled_2d, arnold_iterations)
+        if bool(meta.get("arnold_enabled", True)):
+            recovered_ll_bits = arnold_unscramble(scrambled_2d, arnold_iterations)
+        else:
+            recovered_ll_bits = scrambled_2d.astype(np.uint8)
 
         ll_low = float(meta.get("watermark_ll_low_value", 0.0))
         ll_high = float(meta.get("watermark_ll_high_value", 2.0))
@@ -432,8 +474,13 @@ def reconstruct_binary_watermark_from_payload_bits(payload_bits, meta: dict, par
         bits_scrambled = np.concatenate([bits_scrambled, np.zeros((wm_bit_len - bits_scrambled.size,), dtype=np.uint8)])
     elif bits_scrambled.size > wm_bit_len:
         bits_scrambled = bits_scrambled[:wm_bit_len]
-    scrambled_2d = bits_scrambled.reshape((wm_size, wm_size)).astype(np.uint8)
-    recovered_bits_2d = arnold_unscramble(scrambled_2d, arnold_iterations)
+    payload_shape = tuple(int(x) for x in meta.get("payload_shape", (wm_size, wm_size)))
+    scrambled_2d = bits_scrambled.reshape(payload_shape).astype(np.uint8)
+    if bool(meta.get("arnold_enabled", True)):
+        recovered_bits_2d = arnold_unscramble(scrambled_2d, arnold_iterations)
+    else:
+        recovered_bits_2d = scrambled_2d.astype(np.uint8)
+    recovered_bits_2d = recovered_bits_2d[:wm_size, :wm_size]
     return _force_binary_watermark_exact((recovered_bits_2d * 255).astype(np.uint8), wm_size, WM_BIN_THRESH)
 
 
@@ -695,6 +742,30 @@ def _best_hpos_candidate(block0: np.ndarray, bit: int, params: ProposalParams) -
     return min(all_h, key=lambda c: float(c["mse"]))
 
 
+
+def _select_candidate_for_ablation(cands: list[dict], params: ProposalParams) -> dict | None:
+    """Select the candidate block according to the active proposal/ablation rule."""
+    if not cands:
+        return None
+
+    mode = str(getattr(params, "candidate_selection_mode", "bss_mse")).lower().strip()
+    if mode in {"no_strength_filter", "unfiltered", "raw"}:
+        pool = list(cands)
+    else:
+        pool = [c for c in cands if _candidate_is_strong_enough(c, params)]
+
+    if not pool:
+        return None
+
+    if mode in {"mse", "mse_only", "min_mse"}:
+        return min(pool, key=lambda c: float(c["mse"]))
+    if mode in {"bss", "bss_only", "survival_only"}:
+        return sorted(pool, key=lambda c: (float(c["score"]), -float(c["mse"])), reverse=True)[0]
+
+    # Default full proposal: BSS/MSE weighted rank, matching the existing method.
+    return sorted(pool, key=lambda c: _candidate_rank_key(c, params), reverse=True)[0]
+
+
 # =========================================================
 # Block selection and structured repetition
 # =========================================================
@@ -821,27 +892,29 @@ class ProposalQHDWTHess:
             block0 = band[i : i + bs, j : j + bs].copy()
 
             try:
-                block_q4 = _build_q4_candidate(block0, bit, params)
-                score_q4, mse_q4, raw_q4, avg_q4, worst_q4, ok_q4 = _candidate_attack_score(block0, block_q4, FLAG_Q4, bit, params)
-                q_cand = {
-                    "flag": FLAG_Q4,
-                    "block": block_q4,
-                    "score": score_q4,
-                    "mse": mse_q4,
-                    "raw": raw_q4,
-                    "avg": avg_q4,
-                    "worst": worst_q4,
-                    "ok": ok_q4,
-                    "hpos_idx": HPOS_NONE,
-                    "hpos_name": "none",
-                }
+                cands: list[dict] = []
 
-                best_h = _best_hpos_candidate(block0, bit, params)
-                cands = [q_cand, best_h]
-                strong_cands = [c for c in cands if _candidate_is_strong_enough(c, params)]
+                if bool(params.q4_enabled):
+                    block_q4 = _build_q4_candidate(block0, bit, params)
+                    score_q4, mse_q4, raw_q4, avg_q4, worst_q4, ok_q4 = _candidate_attack_score(block0, block_q4, FLAG_Q4, bit, params)
+                    cands.append({
+                        "flag": FLAG_Q4,
+                        "block": block_q4,
+                        "score": score_q4,
+                        "mse": mse_q4,
+                        "raw": raw_q4,
+                        "avg": avg_q4,
+                        "worst": worst_q4,
+                        "ok": ok_q4,
+                        "hpos_idx": HPOS_NONE,
+                        "hpos_name": "none",
+                    })
 
-                if strong_cands:
-                    best = sorted(strong_cands, key=lambda c: _candidate_rank_key(c, params), reverse=True)[0]
+                if bool(params.hpos_enabled):
+                    cands.append(_best_hpos_candidate(block0, bit, params))
+
+                best = _select_candidate_for_ablation(cands, params)
+                if best is not None:
                     band[i : i + bs, j : j + bs] = best["block"]
                     flags.append(int(best["flag"]))
                     hpos_list.append(int(best.get("hpos_idx", HPOS_NONE)))
@@ -869,6 +942,12 @@ class ProposalQHDWTHess:
         wm_meta.update(
             {
                 "structured_repetition_enabled": bool(params.structured_repetition_enabled),
+                "proposal_ablation": str(params.ablation_name),
+                "q4_enabled": bool(params.q4_enabled),
+                "hpos_enabled": bool(params.hpos_enabled),
+                "arnold_enabled": bool(params.arnold_enabled),
+                "candidate_selection_mode": str(params.candidate_selection_mode),
+                "watermark_dwt_enabled_param": bool(params.watermark_dwt_enabled),
                 "structured_repeat_factor": int(repeat_factor),
                 "structured_usable_blocks": int(usable_blocks),
                 "dwt_bands": list(params.dwt_bands),
