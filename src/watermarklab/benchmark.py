@@ -30,6 +30,48 @@ GAATA_PARAM_FORMAT = "watermarklab_gaata2022_key_params_v1"
 DEFAULT_GAATA_PARAM_FILE = "results/gaata2022_key_params.json"
 
 
+PROPOSAL_ABLATION_VARIANTS: dict[str, dict[str, Any]] = {
+    "full": {
+        "description": "Full proposal: watermark DWT-LL payload + Arnold scrambling + Q4/H-position adaptive candidates + structured repetition + BSS/MSE selection.",
+        "params": {},
+    },
+    "q4_only": {
+        "description": "Disable the H-position branch; keep only the Q4/Hessenberg-Q candidate.",
+        "params": {"hpos_enabled": False},
+    },
+    "hpos_only": {
+        "description": "Disable the Q4 branch; keep only H-position quantization candidates.",
+        "params": {"q4_enabled": False},
+    },
+    "no_structured_repetition": {
+        "description": "Disable repeated embedding/majority voting by using only one block per payload bit.",
+        "params": {"structured_repetition_enabled": False, "repeat": 1},
+    },
+    "no_watermark_dwt": {
+        "description": "Disable watermark DWT-LL payload compression and embed the full 64x64 binary watermark directly.",
+        "params": {"watermark_dwt_enabled": False},
+    },
+    "no_arnold": {
+        "description": "Disable Arnold scrambling while keeping the same payload domain.",
+        "params": {"arnold_enabled": False, "arnold_iterations": 0},
+    },
+    "mse_only_selection": {
+        "description": "Use lowest-MSE candidate selection among valid candidates instead of the weighted BSS/MSE score.",
+        "params": {"candidate_selection_mode": "mse_only"},
+    },
+    "bss_only_selection": {
+        "description": "Use BSS/survival-rate-only candidate selection instead of the weighted BSS/MSE score.",
+        "params": {"candidate_selection_mode": "bss_only"},
+    },
+    "no_strength_filter": {
+        "description": "Select from all candidates without the strong-candidate survival/MSE filter.",
+        "params": {"candidate_selection_mode": "no_strength_filter"},
+    },
+}
+
+DEFAULT_PROPOSAL_ABLATION_VARIANTS = ",".join(PROPOSAL_ABLATION_VARIANTS.keys())
+
+
 def _safe_num(x):
     if isinstance(x, (np.floating, np.integer)):
         return x.item()
@@ -386,6 +428,13 @@ def run_benchmark(
                         key_info["proposal_h01_q"] = float(key.params.h01_q)
                         key_info["proposal_h01_margin"] = float(key.params.h01_margin)
                         key_info["proposal_dwt_mode"] = str(key.params.dwt_mode)
+                        key_info["proposal_ablation"] = str(getattr(key.params, "ablation_name", "full"))
+                        key_info["proposal_q4_enabled"] = bool(getattr(key.params, "q4_enabled", True))
+                        key_info["proposal_hpos_enabled"] = bool(getattr(key.params, "hpos_enabled", True))
+                        key_info["proposal_arnold_enabled"] = bool(getattr(key.params, "arnold_enabled", True))
+                        key_info["proposal_watermark_dwt_enabled"] = bool(getattr(key.params, "watermark_dwt_enabled", True))
+                        key_info["proposal_structured_repetition_enabled"] = bool(getattr(key.params, "structured_repetition_enabled", True))
+                        key_info["proposal_candidate_selection_mode"] = str(getattr(key.params, "candidate_selection_mode", "bss_mse"))
 
                 if save_outputs:
                     base = output_dir / "images" / method_id / image_name
@@ -606,6 +655,194 @@ def run_proposal_optimization_phase(
     print(f"Saved optimized proposal parameter CSV to: {csv_path}")
     return payload
 
+
+def _parse_proposal_ablation_variants(raw: str | list[str] | None) -> list[str]:
+    if raw is None:
+        return list(PROPOSAL_ABLATION_VARIANTS.keys())
+    if isinstance(raw, str):
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+    else:
+        parts = [str(p).strip() for p in raw if str(p).strip()]
+    if not parts or parts == ["all"]:
+        return list(PROPOSAL_ABLATION_VARIANTS.keys())
+    unknown = [p for p in parts if p not in PROPOSAL_ABLATION_VARIANTS]
+    if unknown:
+        valid = ", ".join(PROPOSAL_ABLATION_VARIANTS.keys())
+        raise ValueError(f"Unknown proposal ablation variant(s): {unknown}. Valid variants: {valid}, all")
+    return parts
+
+
+def run_proposal_ablation_phase(
+    host_dir: str | Path,
+    watermark_path: str | Path,
+    output_dir: str | Path,
+    *,
+    variants: str | list[str] | None = None,
+    max_images: int | None = None,
+    save_outputs: bool = False,
+    invert_watermark: bool = False,
+    attack_preset: str = "lite",
+    repeat: int | None = None,
+    optimized_payload: dict[str, Any] | None = None,
+    use_optimizer: bool = False,
+    optimizer_trials: int = 4,
+) -> dict[str, Any]:
+    """Run proposal-only ablations and write combined analysis tables.
+
+    Each ablation variant is executed as a separate proposal run so the normal
+    benchmark output for each variant is preserved under ``output_dir/<variant>``.
+    Combined CSVs are written directly in ``output_dir``.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    variant_names = _parse_proposal_ablation_variants(variants)
+
+    all_results: list[pd.DataFrame] = []
+    all_summaries: list[pd.DataFrame] = []
+    all_comparisons: list[pd.DataFrame] = []
+    failures: list[dict[str, Any]] = []
+    manifest_rows: list[dict[str, Any]] = []
+
+    for variant_name in variant_names:
+        spec = PROPOSAL_ABLATION_VARIANTS[variant_name]
+        params = {"repeat": repeat, "dwt_mode": "pywt", "ablation_name": variant_name}
+        params.update(dict(spec.get("params", {})))
+        # Explicit variant params should win over the global repeat setting.
+        if "repeat" in spec.get("params", {}):
+            params["repeat"] = spec["params"]["repeat"]
+
+        variant_output = output_dir / variant_name
+        print(f"[ABLATION] Running {variant_name}: {spec['description']}")
+        result = run_benchmark(
+            host_dir=host_dir,
+            watermark_path=watermark_path,
+            output_dir=variant_output,
+            selected_methods=["proposal"],
+            max_images=max_images,
+            save_outputs=save_outputs,
+            invert_watermark=invert_watermark,
+            attack_preset=attack_preset,
+            proposal_options={
+                "use_optimizer": bool(use_optimizer),
+                "optimizer_trials": int(optimizer_trials),
+                "params": params,
+                "optimized_payload": optimized_payload,
+            },
+            baseline_modes={},
+            guo_options={},
+            gaata_options={},
+        )
+
+        for key in ["results", "summary", "comparison"]:
+            df = result.get(key)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                df = df.copy()
+                if "proposal_ablation" not in df.columns:
+                    df["proposal_ablation"] = variant_name
+                df["ablation_description"] = str(spec["description"])
+                if key == "results":
+                    all_results.append(df)
+                elif key == "summary":
+                    all_summaries.append(df)
+                else:
+                    all_comparisons.append(df)
+
+        for rec in result.get("failures", []):
+            rec2 = dict(rec)
+            rec2["proposal_ablation"] = variant_name
+            failures.append(rec2)
+
+        manifest_rows.append({
+            "proposal_ablation": variant_name,
+            "description": str(spec["description"]),
+            "params": json.dumps(params, ensure_ascii=False, default=_json_default),
+            "output_dir": str(variant_output),
+        })
+
+    manifest = pd.DataFrame(manifest_rows)
+    manifest.to_csv(output_dir / "proposal_ablation_manifest.csv", index=False)
+
+    results_df = pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame()
+    summary_df = pd.DataFrame()
+    attack_summary_df = pd.DataFrame()
+    delta_df = pd.DataFrame()
+
+    if not results_df.empty:
+        results_path = output_dir / "proposal_ablation_per_image_attack_results.csv"
+        results_df.to_csv(results_path, index=False)
+
+        agg_kwargs = dict(
+            psnr_mean=("psnr", "mean"),
+            ssim_mean=("ssim", "mean"),
+            nc_mean=("nc", "mean"),
+            ncc_mean=("ncc", "mean"),
+            ber_mean=("ber", "mean"),
+            psnr_std=("psnr", "std"),
+            nc_min=("nc", "min"),
+            ber_max=("ber", "max"),
+            images=("image", "nunique"),
+            rows=("image", "count"),
+            embed_time_mean_sec=("embed_time_sec", "mean"),
+            extract_time_mean_sec=("extract_time_sec", "mean"),
+        )
+        for optional in ["proposal_q4_used", "proposal_h_used", "proposal_skip_used", "proposal_repeat_factor", "proposal_usable_blocks"]:
+            if optional in results_df.columns:
+                agg_kwargs[f"{optional}_mean"] = (optional, "mean")
+
+        summary_df = (
+            results_df
+            .groupby(["proposal_ablation", "phase"], dropna=False)
+            .agg(**agg_kwargs)
+            .reset_index()
+        )
+        summary_df.to_csv(output_dir / "proposal_ablation_summary_by_variant_phase.csv", index=False)
+
+        after_df = results_df[results_df["phase"] == "after_attack"].copy()
+        if not after_df.empty:
+            attack_summary_df = (
+                after_df
+                .groupby(["proposal_ablation", "attack"], dropna=False)
+                .agg(**agg_kwargs)
+                .reset_index()
+            )
+            attack_summary_df.to_csv(output_dir / "proposal_ablation_summary_by_variant_attack.csv", index=False)
+
+        full_rows = summary_df[summary_df["proposal_ablation"] == "full"]
+        deltas: list[dict[str, Any]] = []
+        for _, row in summary_df.iterrows():
+            phase = row["phase"]
+            base = full_rows[full_rows["phase"] == phase]
+            if base.empty:
+                continue
+            base_row = base.iloc[0]
+            rec = {"proposal_ablation": row["proposal_ablation"], "phase": phase}
+            for metric in ["psnr_mean", "ssim_mean", "nc_mean", "ncc_mean", "ber_mean", "nc_min", "ber_max"]:
+                if metric in row and metric in base_row:
+                    rec[f"delta_{metric}_vs_full"] = float(row[metric]) - float(base_row[metric])
+            deltas.append(rec)
+        if deltas:
+            delta_df = pd.DataFrame(deltas)
+            delta_df.to_csv(output_dir / "proposal_ablation_delta_vs_full.csv", index=False)
+
+        print(f"Saved combined ablation results to: {results_path}")
+        print(f"Saved ablation phase summary to: {output_dir / 'proposal_ablation_summary_by_variant_phase.csv'}")
+        if not attack_summary_df.empty:
+            print(f"Saved ablation attack summary to: {output_dir / 'proposal_ablation_summary_by_variant_attack.csv'}")
+        if not delta_df.empty:
+            print(f"Saved full-vs-ablation deltas to: {output_dir / 'proposal_ablation_delta_vs_full.csv'}")
+        print(summary_df.to_string(index=False))
+
+    with open(output_dir / "proposal_ablation_failures.json", "w", encoding="utf-8") as f:
+        json.dump(failures, f, indent=2, ensure_ascii=False, default=_json_default)
+
+    return {
+        "results": results_df,
+        "summary": summary_df,
+        "attack_summary": attack_summary_df,
+        "delta_vs_full": delta_df,
+        "manifest": manifest,
+        "failures": failures,
+    }
 
 
 
@@ -1129,7 +1366,7 @@ def run_proposal_plot_phase(
 
 def main():
     parser = argparse.ArgumentParser(description="Run the cleaned watermarking benchmark on 512x512 RGB host images and a 64x64 binary watermark.")
-    parser.add_argument("--phase", default="normal", choices=["normal", "optimize", "optimization", "proposal-plot", "proposal_plot", "plot-proposal"], help="normal: run benchmark; optimize: search/export parameters; proposal-plot: generate 3x2 NC-vs-attack-parameter plots for the proposal method.")
+    parser.add_argument("--phase", default="normal", choices=["normal", "optimize", "optimization", "proposal-plot", "proposal_plot", "plot-proposal", "proposal-ablation", "proposal_ablation", "ablation"], help="normal: run benchmark; optimize: search/export parameters; proposal-plot: generate NC-vs-attack plots; proposal-ablation: run proposal component ablations.")
     parser.add_argument("--host-dir", default="data/host")
     parser.add_argument("--watermark", default="data/watermark/wm.png")
     parser.add_argument("--output", default="results/common_benchmark")
@@ -1183,6 +1420,7 @@ def main():
     parser.add_argument("--proposal-optimizer-alpha-decay", type=float, default=0.80)
     parser.add_argument("--proposal-optimizer-seed", type=int, default=123)
     parser.add_argument("--proposal-repeat", default="full", help="Default full/faithful uses all source-script structured repetition; use an integer such as 3 only for quick practical runs.")
+    parser.add_argument("--ablation-variants", default=DEFAULT_PROPOSAL_ABLATION_VARIANTS, help="Comma-separated proposal ablations to run, or all. Valid: " + ",".join(PROPOSAL_ABLATION_VARIANTS.keys()))
     parser.add_argument("--plot-watermarks", default="", help="Optional comma-separated watermark files or folders for proposal-plot phase. Empty uses --watermark only.")
     parser.add_argument("--proposal-plot-hosts", default="airplane.bmp,Girl.bmp,house.bmp,milkdrop.bmp,safari.bmp,tiffany.bmp", help="Comma-separated host-image names for proposal-plot phase.")
     parser.add_argument("--proposal-plot-jpeg-values", default="100,95,90,85,80,75,70,65,60,55,50,45,40,35,30,25,20")
@@ -1328,6 +1566,23 @@ def main():
         "qim_step": float(args.gaata_qim_step),
         "optimized_payload": gaata_optimized_payload,
     }
+
+    if args.phase in {"proposal-ablation", "proposal_ablation", "ablation"}:
+        run_proposal_ablation_phase(
+            host_dir=args.host_dir,
+            watermark_path=args.watermark,
+            output_dir=args.output,
+            variants=args.ablation_variants,
+            max_images=args.max_images,
+            save_outputs=not args.no_save_images,
+            invert_watermark=args.invert_watermark,
+            attack_preset=args.attack_preset,
+            repeat=repeat_value,
+            optimized_payload=optimized_payload,
+            use_optimizer=bool(args.proposal_use_optimizer),
+            optimizer_trials=fireflies,
+        )
+        return
 
     if args.phase in {"proposal-plot", "proposal_plot", "plot-proposal"}:
         proposal_plot_watermarks = _resolve_proposal_plot_watermarks(args.watermark, args.plot_watermarks)
