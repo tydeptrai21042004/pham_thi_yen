@@ -36,7 +36,7 @@ def test_dwt_wht_svd2024_matches_requested_payload_and_semiblind_contract():
 
 def test_qwt_qsvd_zhang2022_blind_uses_4096_bits_on_512_color_host():
     host, wm = _sample_data()
-    method = QWTQSVDZhang2022(extraction_mode="blind", delta=10.0)
+    method = QWTQSVDZhang2022(extraction_mode="blind", delta=4.0)
     watermarked, key = method.embed(host, wm)
     extracted = method.extract(watermarked, key, host_rgb=host)
 
@@ -55,7 +55,7 @@ def test_qwt_qsvd_zhang2022_blind_uses_4096_bits_on_512_color_host():
 
 def test_qwt_qsvd_zhang2022_semiblind_keeps_selector_side_information():
     host, wm = _sample_data()
-    method = QWTQSVDZhang2022(extraction_mode="semi-blind", delta=10.0)
+    method = QWTQSVDZhang2022(extraction_mode="semi-blind", delta=4.0)
     watermarked, key = method.embed(host, wm)
     extracted = method.extract(watermarked, key, host_rgb=host)
 
@@ -71,3 +71,26 @@ def test_qwt_qsvd_zhang2022_semiblind_keeps_selector_side_information():
 def test_new_baselines_registered_by_id():
     methods = build_methods(["dwt_wht_svd_2024", "qwt_qsvd_zhang2022_blind", "qwt_qsvd_zhang2022_semiblind"])
     assert list(methods.keys()) == ["dwt_wht_svd_2024", "qwt_qsvd_zhang2022_blind", "qwt_qsvd_zhang2022_semiblind"]
+
+
+def test_qwt_qsvd_semiblind_selector_changes_extraction_after_attack():
+    import numpy as np
+    from watermarklab.common.attack import median_filter
+
+    host, wm = _sample_data()
+    blind = QWTQSVDZhang2022(extraction_mode="blind", delta=4.0)
+    semiblind = QWTQSVDZhang2022(extraction_mode="semi-blind", delta=4.0)
+
+    watermarked_blind, key_blind = blind.embed(host, wm)
+    watermarked_semiblind, key_semiblind = semiblind.embed(host, wm)
+    assert np.array_equal(watermarked_blind, watermarked_semiblind)
+    assert key_blind.selector is None
+    assert key_semiblind.selector is not None
+    assert len(set(key_semiblind.selector.tolist())) >= 2
+
+    attacked = median_filter(watermarked_semiblind, size=3)
+    extracted_blind = blind.extract(attacked, key_blind, host_rgb=host)
+    extracted_semiblind = semiblind.extract(attacked, key_semiblind, host_rgb=host)
+
+    assert not np.array_equal(extracted_blind, extracted_semiblind)
+    assert nc(wm, extracted_semiblind) >= nc(wm, extracted_blind) - 0.05
