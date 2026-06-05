@@ -307,3 +307,22 @@ grid    large parameter sweep with many attack levels
 ```
 
 Use `--attack-preset grid` when you want many attack variables for sensitivity testing.
+
+
+## Proposal size sweep command
+
+Run the proposal method with several host and watermark sizes without modifying `data/`:
+
+```bash
+python main.py \
+  --phase proposal-size-sweep \
+  --host-dir data/host \
+  --watermark data/watermark/wm.png \
+  --output results/proposal_size_sweep \
+  --attack-preset lite \
+  --size-sweep-host-sizes 256,512,1024 \
+  --size-sweep-watermark-sizes 32,64,128 \
+  --proposal-param-mode ignore
+```
+
+The command writes CSV files and plots for clean PSNR before attack and NC after attack into the selected output folder.

@@ -1364,13 +1364,393 @@ def run_proposal_plot_phase(
         print(f"Saved proposal clean summary CSV to: {summary_path}")
 
 
+def _load_resized_rgb_image(path: str | Path, size: int) -> np.ndarray:
+    """Load an image and resize it in memory; never writes back to data/."""
+    from PIL import Image
+
+    path = Path(path)
+    img = Image.open(path)
+    if img.mode == "RGBA":
+        bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+        img = Image.alpha_composite(bg, img.convert("RGBA")).convert("RGB")
+    else:
+        img = img.convert("RGB")
+    img = img.resize((int(size), int(size)), Image.Resampling.BICUBIC)
+    return np.asarray(img, dtype=np.uint8)
+
+
+def _load_resized_binary_watermark(path: str | Path, size: int, *, threshold: int = 127, invert: bool = False) -> np.ndarray:
+    """Load a watermark and resize/binarize it in memory; never writes back to data/."""
+    from PIL import Image
+
+    path = Path(path)
+    img = Image.open(path)
+    if img.mode == "RGBA":
+        bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+        img = Image.alpha_composite(bg, img.convert("RGBA")).convert("RGB")
+    else:
+        img = img.convert("RGB")
+    img = img.resize((int(size), int(size)), Image.Resampling.NEAREST).convert("L")
+    arr = np.asarray(img, dtype=np.uint8)
+    out = np.where(arr >= int(threshold), 255, 0).astype(np.uint8)
+    if invert:
+        out = 255 - out
+    return out
+
+
+def _validate_size_sweep_values(host_sizes: list[int], watermark_sizes: list[int]) -> tuple[list[int], list[int]]:
+    host_sizes = sorted({int(x) for x in host_sizes if int(x) > 0})
+    watermark_sizes = sorted({int(x) for x in watermark_sizes if int(x) > 0})
+    if not host_sizes:
+        raise ValueError("At least one positive host size is required.")
+    if not watermark_sizes:
+        raise ValueError("At least one positive watermark size is required.")
+    for hs in host_sizes:
+        if hs < 16:
+            raise ValueError(f"Host size {hs} is too small for the proposal DWT/block pipeline.")
+    for ws in watermark_sizes:
+        if ws < 2 or ws % 2 != 0:
+            raise ValueError(f"Watermark size {ws} must be a positive even square size.")
+    return host_sizes, watermark_sizes
+
+
+def _plot_size_sweep_bar(summary_df: pd.DataFrame, value_col: str, title: str, ylabel: str, output_base: Path, *, dpi: int = 180) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if summary_df.empty or value_col not in summary_df.columns:
+        return
+    plot_df = summary_df.copy()
+    plot_df["size_label"] = plot_df.apply(lambda r: f"H{int(r['host_size'])}/W{int(r['watermark_size'])}", axis=1)
+    plot_df = plot_df.sort_values(["host_size", "watermark_size"])
+
+    fig, ax = plt.subplots(figsize=(max(8.0, 0.55 * len(plot_df)), 5.0))
+    ax.bar(plot_df["size_label"].tolist(), plot_df[value_col].astype(float).to_numpy())
+    ax.set_title(title)
+    ax.set_xlabel("Host/watermark size")
+    ax.set_ylabel(ylabel)
+    ax.grid(True, axis="y", alpha=0.35)
+    ax.tick_params(axis="x", rotation=45)
+    fig.tight_layout()
+    fig.savefig(str(output_base.with_suffix(".png")), dpi=int(dpi))
+    fig.savefig(str(output_base.with_suffix(".pdf")))
+    plt.close(fig)
+
+
+def _plot_size_sweep_heatmap(summary_df: pd.DataFrame, value_col: str, title: str, output_base: Path, *, dpi: int = 180) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if summary_df.empty or value_col not in summary_df.columns:
+        return
+    host_sizes = sorted(int(x) for x in summary_df["host_size"].dropna().unique())
+    wm_sizes = sorted(int(x) for x in summary_df["watermark_size"].dropna().unique())
+    if not host_sizes or not wm_sizes:
+        return
+    mat = np.full((len(host_sizes), len(wm_sizes)), np.nan, dtype=np.float64)
+    for _, row in summary_df.iterrows():
+        hi = host_sizes.index(int(row["host_size"]))
+        wi = wm_sizes.index(int(row["watermark_size"]))
+        mat[hi, wi] = float(row[value_col])
+
+    fig, ax = plt.subplots(figsize=(max(6.0, 0.9 * len(wm_sizes)), max(4.0, 0.55 * len(host_sizes))))
+    im = ax.imshow(mat, aspect="auto")
+    ax.set_title(title)
+    ax.set_xlabel("Watermark size")
+    ax.set_ylabel("Host size")
+    ax.set_xticks(np.arange(len(wm_sizes)), labels=[str(x) for x in wm_sizes])
+    ax.set_yticks(np.arange(len(host_sizes)), labels=[str(x) for x in host_sizes])
+    for i in range(len(host_sizes)):
+        for j in range(len(wm_sizes)):
+            if np.isfinite(mat[i, j]):
+                ax.text(j, i, f"{mat[i, j]:.3f}" if value_col.lower().startswith("mean_attack") else f"{mat[i, j]:.2f}", ha="center", va="center")
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    fig.savefig(str(output_base.with_suffix(".png")), dpi=int(dpi))
+    fig.savefig(str(output_base.with_suffix(".pdf")))
+    plt.close(fig)
+
+
+def run_proposal_size_sweep_phase(
+    *,
+    host_dir: str | Path,
+    watermark_paths: list[str | Path],
+    output_dir: str | Path,
+    host_sizes: list[int],
+    watermark_sizes: list[int],
+    max_images: int | None = None,
+    save_outputs: bool = False,
+    invert_watermark: bool = False,
+    attack_preset: str = "lite",
+    proposal_options: dict[str, Any] | None = None,
+    dpi: int = 180,
+) -> dict[str, Any]:
+    """Run the proposal over multiple in-memory host/watermark sizes.
+
+    The data folder is never modified.  Host images and watermarks are resized
+    only as arrays used by this experiment, and optional visual outputs are saved
+    under ``output_dir``.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    host_sizes, watermark_sizes = _validate_size_sweep_values(host_sizes, watermark_sizes)
+
+    host_paths = list_image_files(host_dir)
+    if max_images is not None:
+        host_paths = host_paths[: int(max_images)]
+    if not host_paths:
+        raise ValueError(f"No host images found in {host_dir}")
+
+    wm_paths = [Path(p) for p in watermark_paths]
+    if not wm_paths:
+        raise ValueError("At least one watermark path is required.")
+    for wm_path in wm_paths:
+        if not wm_path.exists():
+            raise FileNotFoundError(f"Watermark file not found: {wm_path}")
+
+    base_params = ProposalParams.from_dict((proposal_options or {}).get("params") or {"repeat": None, "dwt_mode": "pywt"})
+    optimized_payload = (proposal_options or {}).get("optimized_payload")
+    use_optimizer = bool((proposal_options or {}).get("use_optimizer", False))
+    optimizer_trials = int((proposal_options or {}).get("optimizer_trials", 4))
+    attacks = default_attack_suite(include_none=False, preset=attack_preset)
+
+    clean_rows: list[dict[str, Any]] = []
+    attack_rows: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+
+    for host_path in host_paths:
+        params, param_source = _select_proposal_params_for_image(host_path, base_params, optimized_payload)
+        for host_size in host_sizes:
+            try:
+                host_rgb = _load_resized_rgb_image(host_path, host_size)
+            except Exception as e:
+                failures.append({"host_image": host_path.name, "host_size": int(host_size), "error": repr(e), "stage": "load_host"})
+                continue
+
+            for wm_path in wm_paths:
+                for watermark_size in watermark_sizes:
+                    context = {
+                        "host_image": host_path.name,
+                        "watermark_file": str(wm_path),
+                        "watermark_name": wm_path.stem,
+                        "host_size": int(host_size),
+                        "watermark_size": int(watermark_size),
+                        "proposal_param_source": param_source,
+                    }
+                    try:
+                        watermark = _load_resized_binary_watermark(wm_path, watermark_size, invert=invert_watermark)
+                        method = ProposalQHDWTHess(params=ProposalParams.from_dict(params.to_dict()), use_optimizer=use_optimizer, optimizer_trials=optimizer_trials)
+                        t0 = time.perf_counter()
+                        watermarked, key = method.embed(host_rgb, watermark)
+                        embed_time = time.perf_counter() - t0
+                        t1 = time.perf_counter()
+                        extracted_clean = method.extract(watermarked, key, host_rgb=host_rgb)
+                        extract_clean_time = time.perf_counter() - t1
+
+                        q4_used = int(sum(1 for x in getattr(key, "flags", []) if int(x) == 0))
+                        h_used = int(sum(1 for x in getattr(key, "flags", []) if int(x) == 1))
+                        skip_used = int(sum(1 for x in getattr(key, "flags", []) if int(x) == 2))
+                        clean_row = {
+                            **context,
+                            "phase": "before_attack",
+                            "attack": "no_attack",
+                            "clean_psnr": float(psnr(host_rgb, watermarked)),
+                            "clean_ssim": float(ssim(host_rgb, watermarked)),
+                            "clean_nc": float(nc(watermark, extracted_clean)),
+                            "clean_ncc": float(ncc(watermark, extracted_clean)),
+                            "clean_ber": float(ber(watermark, extracted_clean)),
+                            "embed_time_sec": float(embed_time),
+                            "extract_time_sec": float(extract_clean_time),
+                            "proposal_repeat_factor": int(getattr(key, "repeat_factor", 0)),
+                            "proposal_usable_blocks": int(getattr(key, "usable_blocks", 0)),
+                            "proposal_total_blocks": int(getattr(key, "total_blocks", 0)),
+                            "proposal_q4_used": q4_used,
+                            "proposal_h_used": h_used,
+                            "proposal_skip_used": skip_used,
+                        }
+                        clean_rows.append(clean_row)
+
+                        if save_outputs:
+                            base = output_dir / "images" / f"host_{host_size}" / f"wm_{watermark_size}" / host_path.stem / wm_path.stem
+                            save_image(base / "host_resized.png", host_rgb)
+                            save_image(base / "watermark_resized.png", watermark)
+                            save_image(base / "host_before_attack_watermarked.png", watermarked)
+                            save_image(base / "watermark_extracted_before_attack.png", extracted_clean)
+
+                        for attack in attacks:
+                            try:
+                                attacked = apply_attack(watermarked, attack)
+                                t2 = time.perf_counter()
+                                extracted = method.extract(attacked, key, host_rgb=host_rgb)
+                                extract_time = time.perf_counter() - t2
+                                attack_row = {
+                                    **context,
+                                    "phase": "after_attack",
+                                    "attack": attack.name,
+                                    "attack_group": attack.group,
+                                    "attack_params": json.dumps(attack.params, ensure_ascii=False, default=_json_default),
+                                    "psnr_after_attack": float(psnr(host_rgb, attacked)),
+                                    "ssim_after_attack": float(ssim(host_rgb, attacked)),
+                                    "nc_after_attack": float(nc(watermark, extracted)),
+                                    "ncc_after_attack": float(ncc(watermark, extracted)),
+                                    "ber_after_attack": float(ber(watermark, extracted)),
+                                    "embed_time_sec": float(embed_time),
+                                    "extract_time_sec": float(extract_time),
+                                    "proposal_repeat_factor": int(getattr(key, "repeat_factor", 0)),
+                                    "proposal_usable_blocks": int(getattr(key, "usable_blocks", 0)),
+                                    "proposal_total_blocks": int(getattr(key, "total_blocks", 0)),
+                                    "proposal_q4_used": q4_used,
+                                    "proposal_h_used": h_used,
+                                    "proposal_skip_used": skip_used,
+                                }
+                                attack_rows.append(attack_row)
+                                if save_outputs:
+                                    attack_base = base / "attacks" / attack.name
+                                    save_image(attack_base / "host_after_attack.png", attacked)
+                                    save_image(attack_base / "watermark_extracted_after_attack.png", extracted)
+                            except Exception as e:
+                                failures.append({**context, "attack": attack.name, "error": repr(e), "stage": "attack_extract"})
+                    except Exception as e:
+                        failures.append({**context, "attack": "embedding_or_clean_extraction", "error": repr(e), "stage": "embed_extract"})
+
+    clean_df = pd.DataFrame(clean_rows)
+    attack_df = pd.DataFrame(attack_rows)
+    clean_path = output_dir / "proposal_size_sweep_clean_results.csv"
+    attack_path = output_dir / "proposal_size_sweep_attack_results.csv"
+    clean_df.to_csv(clean_path, index=False)
+    attack_df.to_csv(attack_path, index=False)
+
+    if not clean_df.empty:
+        clean_summary = (
+            clean_df.groupby(["host_size", "watermark_size"], dropna=False)
+            .agg(
+                clean_psnr_mean=("clean_psnr", "mean"),
+                clean_psnr_std=("clean_psnr", "std"),
+                clean_ssim_mean=("clean_ssim", "mean"),
+                clean_nc_mean=("clean_nc", "mean"),
+                clean_ber_mean=("clean_ber", "mean"),
+                repeat_factor_mean=("proposal_repeat_factor", "mean"),
+                usable_blocks_mean=("proposal_usable_blocks", "mean"),
+                host_images=("host_image", "nunique"),
+                watermarks=("watermark_file", "nunique"),
+                rows=("host_image", "count"),
+            )
+            .reset_index()
+        )
+    else:
+        clean_summary = pd.DataFrame()
+    clean_summary_path = output_dir / "proposal_size_sweep_clean_summary.csv"
+    clean_summary.to_csv(clean_summary_path, index=False)
+
+    if not attack_df.empty:
+        attack_summary = (
+            attack_df.groupby(["host_size", "watermark_size", "attack"], dropna=False)
+            .agg(
+                nc_after_attack_mean=("nc_after_attack", "mean"),
+                nc_after_attack_min=("nc_after_attack", "min"),
+                ber_after_attack_mean=("ber_after_attack", "mean"),
+                psnr_after_attack_mean=("psnr_after_attack", "mean"),
+                rows=("host_image", "count"),
+            )
+            .reset_index()
+        )
+        combo_attack_summary = (
+            attack_df.groupby(["host_size", "watermark_size"], dropna=False)
+            .agg(
+                mean_attack_nc=("nc_after_attack", "mean"),
+                min_attack_nc=("nc_after_attack", "min"),
+                mean_attack_ber=("ber_after_attack", "mean"),
+                mean_attack_psnr=("psnr_after_attack", "mean"),
+                attack_rows=("host_image", "count"),
+            )
+            .reset_index()
+        )
+    else:
+        attack_summary = pd.DataFrame()
+        combo_attack_summary = pd.DataFrame()
+    attack_summary_path = output_dir / "proposal_size_sweep_attack_summary_by_attack.csv"
+    combo_attack_summary_path = output_dir / "proposal_size_sweep_attack_summary_by_size.csv"
+    attack_summary.to_csv(attack_summary_path, index=False)
+    combo_attack_summary.to_csv(combo_attack_summary_path, index=False)
+
+    if not clean_summary.empty:
+        combo_summary = clean_summary.copy()
+        if not combo_attack_summary.empty:
+            combo_summary = combo_summary.merge(combo_attack_summary, on=["host_size", "watermark_size"], how="left")
+        else:
+            combo_summary["mean_attack_nc"] = np.nan
+            combo_summary["min_attack_nc"] = np.nan
+            combo_summary["mean_attack_ber"] = np.nan
+            combo_summary["mean_attack_psnr"] = np.nan
+            combo_summary["attack_rows"] = 0
+    else:
+        combo_summary = pd.DataFrame()
+    combo_summary_path = output_dir / "proposal_size_sweep_summary_by_size.csv"
+    combo_summary.to_csv(combo_summary_path, index=False)
+
+    with open(output_dir / "proposal_size_sweep_failures.json", "w", encoding="utf-8") as f:
+        json.dump(failures, f, indent=2, ensure_ascii=False, default=_json_default)
+
+    if not combo_summary.empty:
+        _plot_size_sweep_bar(
+            combo_summary,
+            "clean_psnr_mean",
+            "Proposal clean PSNR before attack by host/watermark size",
+            "PSNR before attack (dB)",
+            output_dir / "proposal_size_sweep_psnr_before_attack",
+            dpi=dpi,
+        )
+        _plot_size_sweep_heatmap(
+            combo_summary,
+            "clean_psnr_mean",
+            "Clean PSNR before attack",
+            output_dir / "proposal_size_sweep_psnr_before_attack_heatmap",
+            dpi=dpi,
+        )
+        if "mean_attack_nc" in combo_summary.columns and combo_summary["mean_attack_nc"].notna().any():
+            _plot_size_sweep_bar(
+                combo_summary,
+                "mean_attack_nc",
+                "Proposal mean NC after attack by host/watermark size",
+                "Mean NC after attack",
+                output_dir / "proposal_size_sweep_nc_after_attack",
+                dpi=dpi,
+            )
+            _plot_size_sweep_heatmap(
+                combo_summary,
+                "mean_attack_nc",
+                "Mean NC after attack",
+                output_dir / "proposal_size_sweep_nc_after_attack_heatmap",
+                dpi=dpi,
+            )
+
+    print(f"Saved proposal size-sweep clean CSV to: {clean_path}")
+    print(f"Saved proposal size-sweep attack CSV to: {attack_path}")
+    print(f"Saved proposal size-sweep summary to: {combo_summary_path}")
+    if not combo_summary.empty:
+        print(combo_summary.to_string(index=False))
+    if failures:
+        print(f"Size-sweep failures: {len(failures)}. See proposal_size_sweep_failures.json")
+
+    return {
+        "clean_results": clean_df,
+        "attack_results": attack_df,
+        "clean_summary": clean_summary,
+        "attack_summary": attack_summary,
+        "summary_by_size": combo_summary,
+        "failures": failures,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run the cleaned watermarking benchmark on 512x512 RGB host images and a 64x64 binary watermark.")
-    parser.add_argument("--phase", default="normal", choices=["normal", "optimize", "optimization", "proposal-plot", "proposal_plot", "plot-proposal", "proposal-ablation", "proposal_ablation", "ablation"], help="normal: run benchmark; optimize: search/export parameters; proposal-plot: generate NC-vs-attack plots; proposal-ablation: run proposal component ablations.")
+    parser.add_argument("--phase", default="normal", choices=["normal", "optimize", "optimization", "proposal-plot", "proposal_plot", "plot-proposal", "proposal-ablation", "proposal_ablation", "ablation", "proposal-size-sweep", "proposal_size_sweep", "size-sweep"], help="normal: run benchmark; optimize: search/export parameters; proposal-plot: generate NC-vs-attack plots; proposal-ablation: run proposal component ablations; proposal-size-sweep: run the proposal over multiple resized host/watermark sizes.")
     parser.add_argument("--host-dir", default="data/host")
     parser.add_argument("--watermark", default="data/watermark/wm.png")
     parser.add_argument("--output", default="results/common_benchmark")
-    parser.add_argument("--methods", default="all", help="Comma-separated: all,baselines,kumar2021,guo2017_dwt_qr_fa,gaata2022_dwt_hess_fwa,dwt_hd_svd_2025,hess_nha2023,roy2018_dwt_svd,dwt_wht_svd_2024,qwt_qsvd_zhang2022_blind,qwt_qsvd_zhang2022_semiblind,proposal")
+    parser.add_argument("--methods", default="all", help="Comma-separated: all,baselines,kumar2021,guo2017_dwt_qr_fa,gaata2022_dwt_hess_fwa,dwt_hd_svd_2025,hess_nha2023,roy2018_dwt_svd,dwt_wht_svd_2024,qwt_qsvd_zhang2022_blind,qwt_qsvd_zhang2022_semiblind,zhu2021_iwt_svd_adapted,proposal")
     parser.add_argument("--max-images", type=int, default=None, help="Optional quick-run limit.")
     parser.add_argument("--no-save-images", action="store_true")
     parser.add_argument("--invert-watermark", action="store_true")
@@ -1384,6 +1764,7 @@ def main():
     parser.add_argument("--roy-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"], help="Roy2018 mode: adapt/original-rerun run the local DWT-SVD baseline; original writes paper-reported rows.")
     parser.add_argument("--dwt-wht-svd-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"], help="DWT-WHT-SVD2024 mode: adapt/original-rerun run the semi-blind local baseline; original writes paper-reported rows if available.")
     parser.add_argument("--qwt-qsvd-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"], help="Zhang2022 QWT-QSVD mode for both blind and semi-blind variants.")
+    parser.add_argument("--zhu-iwt-svd-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"], help="Zhu2021 IWT-SVD mode. adapt uses the 64x64 YCbCr-Y benchmark adapter; original/original-rerun is for native 32x32 grayscale experiments.")
 
     parser.add_argument("--guo-param-file", default=DEFAULT_GUO_PARAM_FILE, help="JSON file written by Guo Firefly optimization phase. Normal phase loads it automatically when it exists.")
     parser.add_argument("--guo-param-mode", default="auto", choices=["auto", "ignore", "require"], help="auto: use Guo lambda file if present; ignore: fixed/default lambda; require: fail if missing.")
@@ -1435,6 +1816,10 @@ def main():
     parser.add_argument("--proposal-plot-ymax", type=float, default=1.00)
     parser.add_argument("--proposal-plot-dpi", type=int, default=180)
     parser.add_argument("--proposal-plot-layout", default="single", choices=["single", "grid"], help="single: save one figure per attack family; grid: save one 3x2 combined figure.")
+    parser.add_argument("--size-sweep-host-sizes", default="256,512,1024", help="Comma-separated square host sizes for proposal-size-sweep. Images are resized in memory only.")
+    parser.add_argument("--size-sweep-watermark-sizes", default="32,64,128", help="Comma-separated square watermark sizes for proposal-size-sweep. Watermarks are resized in memory only.")
+    parser.add_argument("--size-sweep-watermarks", default="", help="Optional comma-separated watermark files or folders for proposal-size-sweep. Empty uses --watermark.")
+    parser.add_argument("--size-sweep-dpi", type=int, default=180, help="DPI for proposal-size-sweep PNG plots.")
 
     args = parser.parse_args()
     fireflies = int(args.proposal_optimizer_fireflies if args.proposal_optimizer_fireflies is not None else args.proposal_optimizer_trials)
@@ -1521,10 +1906,17 @@ def main():
         "dwt_wht_svd_2024": _mode(args.dwt_wht_svd_mode),
         "qwt_qsvd_zhang2022_blind": _mode(args.qwt_qsvd_mode),
         "qwt_qsvd_zhang2022_semiblind": _mode(args.qwt_qsvd_mode),
+        "zhu2021_iwt_svd_adapted": _mode(args.zhu_iwt_svd_mode),
+    }
+
+    proposal_only_phase = args.phase in {
+        "proposal-ablation", "proposal_ablation", "ablation",
+        "proposal-plot", "proposal_plot", "plot-proposal",
+        "proposal-size-sweep", "proposal_size_sweep", "size-sweep",
     }
 
     guo_optimized_payload = None
-    if args.guo_param_mode != "ignore":
+    if (not proposal_only_phase) and args.guo_param_mode != "ignore":
         guo_optimized_payload = load_guo_param_file(args.guo_param_file)
         if args.guo_param_mode == "require" and not guo_optimized_payload.get("loaded"):
             raise FileNotFoundError(f"Required Guo lambda file was not loaded: {args.guo_param_file}")
@@ -1534,7 +1926,7 @@ def main():
             print(f"[NORMAL] No optimized Guo lambda file found; using default Guo lambda. Checked: {args.guo_param_file}")
 
     gaata_optimized_payload = None
-    if args.gaata_param_mode != "ignore":
+    if (not proposal_only_phase) and args.gaata_param_mode != "ignore":
         gaata_optimized_payload = load_gaata_param_file(args.gaata_param_file)
         if args.gaata_param_mode == "require" and not gaata_optimized_payload.get("loaded"):
             raise FileNotFoundError(f"Required Gaata key-parameter file was not loaded: {args.gaata_param_file}")
@@ -1586,6 +1978,24 @@ def main():
             optimized_payload=optimized_payload,
             use_optimizer=bool(args.proposal_use_optimizer),
             optimizer_trials=fireflies,
+        )
+        return
+
+    if args.phase in {"proposal-size-sweep", "proposal_size_sweep", "size-sweep"}:
+        raw_wm = str(args.size_sweep_watermarks).strip()
+        size_sweep_watermarks = _resolve_proposal_plot_watermarks(args.watermark, raw_wm)
+        run_proposal_size_sweep_phase(
+            host_dir=args.host_dir,
+            watermark_paths=size_sweep_watermarks,
+            output_dir=args.output,
+            host_sizes=_parse_csv_values(args.size_sweep_host_sizes, int),
+            watermark_sizes=_parse_csv_values(args.size_sweep_watermark_sizes, int),
+            max_images=args.max_images,
+            save_outputs=not args.no_save_images,
+            invert_watermark=args.invert_watermark,
+            attack_preset=args.attack_preset,
+            proposal_options=proposal_options,
+            dpi=int(args.size_sweep_dpi),
         )
         return
 
