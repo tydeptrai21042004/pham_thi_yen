@@ -341,14 +341,23 @@ def _dwt_merge_4bands(bands: dict[str, np.ndarray], params: ProposalParams):
 # =========================================================
 # Watermark payload: source-script faithful LL-only watermark DWT
 # =========================================================
-def _force_binary_watermark_exact(img_u8: np.ndarray, size: int = WM_SIZE, thresh: int = WM_BIN_THRESH) -> np.ndarray:
+def _force_binary_watermark_exact(img_u8: np.ndarray, size: int | None = WM_SIZE, thresh: int = WM_BIN_THRESH) -> np.ndarray:
     if img_u8 is None:
         raise ValueError("Watermark image is None.")
     out = np.asarray(img_u8, dtype=np.uint8)
     if out.ndim == 3:
         out = np.mean(out[:, :, :3], axis=2).astype(np.uint8)
-    if out.shape != (size, size):
-        raise ValueError(f"Binary watermark must be exactly {size}x{size}. Got {out.shape}.")
+    if out.ndim != 2:
+        raise ValueError(f"Binary watermark must be a 2-D image. Got {out.shape}.")
+    if size is not None:
+        size = int(size)
+        if out.shape != (size, size):
+            raise ValueError(f"Binary watermark must be exactly {size}x{size}. Got {out.shape}.")
+    else:
+        if out.shape[0] != out.shape[1]:
+            raise ValueError(f"Binary watermark must be square for Arnold scrambling and DWT payload extraction. Got {out.shape}.")
+        if out.shape[0] < 2:
+            raise ValueError(f"Binary watermark is too small. Got {out.shape}.")
     return np.where(out >= int(thresh), 255, 0).astype(np.uint8)
 
 
@@ -356,7 +365,13 @@ def prepare_binary_watermark_payload_from_array(
     watermark_binary: np.ndarray,
     params: ProposalParams,
 ):
-    wm_binary = _force_binary_watermark_exact(watermark_binary, WM_SIZE, WM_BIN_THRESH)
+    # The original script used 64x64 watermarks.  The size-sweep command keeps
+    # the same algorithm but permits any square, even-sized binary watermark
+    # supplied by the in-memory resizing adapter.
+    wm_binary = _force_binary_watermark_exact(watermark_binary, None, WM_BIN_THRESH)
+    wm_size = int(wm_binary.shape[0])
+    if bool(params.watermark_dwt_enabled) and wm_size % 2 != 0:
+        raise ValueError(f"Watermark size must be even when watermark DWT payload is enabled. Got {wm_size}x{wm_size}.")
     wm_bits_2d = (wm_binary >= WM_BIN_THRESH).astype(np.float64)
 
     # Full proposal: embed only the LL subband of the watermark DWT and preserve
@@ -382,7 +397,7 @@ def prepare_binary_watermark_payload_from_array(
 
         meta = {
             "wm_shape": tuple(int(x) for x in wm_binary.shape),
-            "wm_size": int(WM_SIZE),
+            "wm_size": int(wm_size),
             "original_wm_bit_len": int(wm_bits_2d.size),
             "wm_bit_len": int(ll_bits_2d.size),
             "payload_len": int(payload_bits.size),
@@ -414,7 +429,7 @@ def prepare_binary_watermark_payload_from_array(
     payload_bits = payload_2d.reshape(-1).astype(np.uint8)
     meta = {
         "wm_shape": tuple(int(x) for x in wm_binary.shape),
-        "wm_size": int(WM_SIZE),
+        "wm_size": int(wm_size),
         "original_wm_bit_len": int(wm_bits_2d.size),
         "wm_bit_len": int(wm_bits_2d.size),
         "payload_len": int(payload_bits.size),
@@ -863,8 +878,11 @@ class ProposalQHDWTHess:
     def _embed_with_params(self, host_rgb: np.ndarray, watermark_binary: np.ndarray, params: ProposalParams):
         self.params = params
         host_rgb = _ensure_uint8_rgb_basic(host_rgb)
-        if host_rgb.shape[0] != HOST_SIZE or host_rgb.shape[1] != HOST_SIZE:
-            raise ValueError(f"Host image must be exactly {HOST_SIZE}x{HOST_SIZE}. Got {host_rgb.shape[1]}x{host_rgb.shape[0]}.")
+        if host_rgb.shape[0] < _required_multiple_for_dwt(DWT_LEVEL, params.block_size) or host_rgb.shape[1] < _required_multiple_for_dwt(DWT_LEVEL, params.block_size):
+            raise ValueError(
+                f"Host image is too small for DWT + {params.block_size}x{params.block_size} blocks. "
+                f"Got {host_rgb.shape[1]}x{host_rgb.shape[0]}."
+            )
 
         host_bgr, host_embed_orig, bands_by_ch, H0, W0 = self._prepare_embed_space_from_rgb(host_rgb)
         wm_binary, payload_bits, wm_meta = prepare_binary_watermark_payload_from_array(watermark_binary, params)

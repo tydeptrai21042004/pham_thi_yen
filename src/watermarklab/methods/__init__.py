@@ -9,6 +9,7 @@ from watermarklab.methods.hess_nha2023 import HessNha2023Hessenberg
 from watermarklab.methods.roy2018_dwt_svd import Roy2018DWTSVD
 from watermarklab.methods.dwt_wht_svd2024 import DWTWHTSVD2024
 from watermarklab.methods.qwt_qsvd_zhang2022 import QWTQSVDZhang2022
+from watermarklab.methods.zhu2021_iwt_svd import Zhu2021IWTSVD
 from watermarklab.methods.proposal_qh_dwt_hess import ProposalQHDWTHess, ProposalParams
 
 BASELINE_METHOD_IDS = [
@@ -21,6 +22,7 @@ BASELINE_METHOD_IDS = [
     "dwt_wht_svd_2024",
     "qwt_qsvd_zhang2022_blind",
     "qwt_qsvd_zhang2022_semiblind",
+    "zhu2021_iwt_svd_adapted",
 ]
 DEFAULT_METHOD_IDS = BASELINE_METHOD_IDS + ["proposal"]
 
@@ -53,19 +55,29 @@ def build_methods(
         "dwt_wht_svd_2024": DWTWHTSVD2024(mode=baseline_modes.get("dwt_wht_svd_2024", "adapt")),
         "qwt_qsvd_zhang2022_blind": QWTQSVDZhang2022(mode=baseline_modes.get("qwt_qsvd_zhang2022_blind", "adapt"), extraction_mode="blind"),
         "qwt_qsvd_zhang2022_semiblind": QWTQSVDZhang2022(mode=baseline_modes.get("qwt_qsvd_zhang2022_semiblind", "adapt"), extraction_mode="semi-blind"),
+        "zhu2021_iwt_svd_adapted": Zhu2021IWTSVD(mode=baseline_modes.get("zhu2021_iwt_svd_adapted", "adapt")),
         "proposal": ProposalQHDWTHess(params=proposal_params, **proposal_options),
     }
 
-    if selected is None or selected == ["all"]:
-        return {k: all_methods[k] for k in DEFAULT_METHOD_IDS}
-    if selected == ["baselines"]:
-        return {k: all_methods[k] for k in BASELINE_METHOD_IDS}
+    if selected is None:
+        selected_ids = list(DEFAULT_METHOD_IDS)
+    else:
+        selected_ids: list[str] = []
+        for item in selected:
+            if item == "all":
+                selected_ids.extend(DEFAULT_METHOD_IDS)
+            elif item == "baselines":
+                selected_ids.extend(BASELINE_METHOD_IDS)
+            else:
+                selected_ids.append(item)
+        # Preserve user order while removing duplicates.
+        selected_ids = list(dict.fromkeys(selected_ids))
 
-    missing = [k for k in selected if k not in all_methods]
+    missing = [k for k in selected_ids if k not in all_methods]
     if missing:
         valid = ", ".join(DEFAULT_METHOD_IDS + ["baselines", "all"])
         raise KeyError(f"Unknown method id(s): {missing}. Valid choices: {valid}")
-    return {k: all_methods[k] for k in selected}
+    return {k: all_methods[k] for k in selected_ids}
 
 
 __all__ = [
@@ -77,6 +89,7 @@ __all__ = [
     "Roy2018DWTSVD",
     "DWTWHTSVD2024",
     "QWTQSVDZhang2022",
+    "Zhu2021IWTSVD",
     "ProposalQHDWTHess",
     "ProposalParams",
     "BASELINE_METHOD_IDS",

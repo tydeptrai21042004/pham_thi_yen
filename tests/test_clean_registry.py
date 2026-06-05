@@ -12,6 +12,7 @@ def test_clean_method_registry_contains_only_requested_methods():
         "dwt_wht_svd_2024",
         "qwt_qsvd_zhang2022_blind",
         "qwt_qsvd_zhang2022_semiblind",
+        "zhu2021_iwt_svd_adapted",
     ]
     assert DEFAULT_METHOD_IDS == BASELINE_METHOD_IDS + ["proposal"]
     assert list(build_methods(["baselines"]).keys()) == BASELINE_METHOD_IDS
