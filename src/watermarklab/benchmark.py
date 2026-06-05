@@ -1,6 +1,7 @@
 from __future__ import annotations
 import argparse
 import csv
+import itertools
 import json
 import time
 from datetime import datetime, timezone
@@ -654,6 +655,360 @@ def run_proposal_optimization_phase(
     print(f"Saved optimized proposal parameters to: {output_file}")
     print(f"Saved optimized proposal parameter CSV to: {csv_path}")
     return payload
+
+
+
+def _format_hparam_combo_id(index: int, params: ProposalParams) -> str:
+    """Stable, filesystem-safe ID for one Tier-1 proposal hyperparameter setting."""
+    return (
+        f"combo_{int(index):04d}"
+        f"__q4tau_{float(params.q4_tau):.3f}".replace(".", "p")
+        + f"__q4margin_{float(params.q4_margin):.3f}".replace(".", "p")
+        + f"__h01q_{float(params.h01_q):.3f}".replace(".", "p")
+        + f"__h01margin_{float(params.h01_margin):.3f}".replace(".", "p")
+    )
+
+
+def _summarize_proposal_hparam_sweep(all_results: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Create phase-level summary, compact combo summary, and ranking table."""
+    if all_results.empty:
+        empty = pd.DataFrame()
+        return empty, empty, empty
+
+    group_cols = [
+        "sweep_combo_id",
+        "sweep_index",
+        "q4_tau_requested",
+        "q4_margin_requested",
+        "h01_q_requested",
+        "h01_margin_requested",
+        "q4_tau_effective",
+        "q4_margin_effective",
+        "h01_q_effective",
+        "h01_margin_effective",
+        "phase",
+    ]
+    summary = (
+        all_results.groupby(group_cols, dropna=False)
+        .agg(
+            psnr_mean=("psnr", "mean"),
+            ssim_mean=("ssim", "mean"),
+            nc_mean=("nc", "mean"),
+            ncc_mean=("ncc", "mean"),
+            ber_mean=("ber", "mean"),
+            psnr_std=("psnr", "std"),
+            nc_min=("nc", "min"),
+            ber_max=("ber", "max"),
+            images=("image", "nunique"),
+            rows=("image", "count"),
+            embed_time_mean_sec=("embed_time_sec", "mean"),
+            extract_time_mean_sec=("extract_time_sec", "mean"),
+            repeat_factor_mean=("proposal_repeat_factor", "mean"),
+            q4_used_mean=("proposal_q4_used", "mean"),
+            h_used_mean=("proposal_h_used", "mean"),
+            skip_used_mean=("proposal_skip_used", "mean"),
+        )
+        .reset_index()
+    )
+
+    id_cols = [c for c in group_cols if c != "phase"]
+    clean = summary[summary["phase"] == "before_attack"].copy()
+    attack = summary[summary["phase"] == "after_attack"].copy()
+
+    if not clean.empty:
+        clean = clean.rename(
+            columns={
+                "psnr_mean": "clean_psnr_mean",
+                "ssim_mean": "clean_ssim_mean",
+                "nc_mean": "clean_nc_mean",
+                "ncc_mean": "clean_ncc_mean",
+                "ber_mean": "clean_ber_mean",
+                "nc_min": "clean_nc_min",
+                "ber_max": "clean_ber_max",
+                "rows": "clean_rows",
+            }
+        )
+        keep_clean = id_cols + [
+            "clean_psnr_mean",
+            "clean_ssim_mean",
+            "clean_nc_mean",
+            "clean_ncc_mean",
+            "clean_ber_mean",
+            "clean_nc_min",
+            "clean_ber_max",
+            "clean_rows",
+            "images",
+            "embed_time_mean_sec",
+            "extract_time_mean_sec",
+            "repeat_factor_mean",
+            "q4_used_mean",
+            "h_used_mean",
+            "skip_used_mean",
+        ]
+        clean = clean[[c for c in keep_clean if c in clean.columns]]
+
+    if not attack.empty:
+        attack = attack.rename(
+            columns={
+                "psnr_mean": "mean_attack_psnr",
+                "ssim_mean": "mean_attack_ssim",
+                "nc_mean": "mean_attack_nc",
+                "ncc_mean": "mean_attack_ncc",
+                "ber_mean": "mean_attack_ber",
+                "nc_min": "min_attack_nc",
+                "ber_max": "max_attack_ber",
+                "rows": "attack_rows",
+            }
+        )
+        keep_attack = id_cols + [
+            "mean_attack_psnr",
+            "mean_attack_ssim",
+            "mean_attack_nc",
+            "mean_attack_ncc",
+            "mean_attack_ber",
+            "min_attack_nc",
+            "max_attack_ber",
+            "attack_rows",
+        ]
+        attack = attack[[c for c in keep_attack if c in attack.columns]]
+
+    if clean.empty and attack.empty:
+        combo_summary = pd.DataFrame()
+    elif clean.empty:
+        combo_summary = attack.copy()
+    elif attack.empty:
+        combo_summary = clean.copy()
+        combo_summary["mean_attack_nc"] = np.nan
+        combo_summary["min_attack_nc"] = np.nan
+        combo_summary["mean_attack_ber"] = np.nan
+        combo_summary["max_attack_ber"] = np.nan
+        combo_summary["attack_rows"] = 0
+    else:
+        combo_summary = clean.merge(attack, on=id_cols, how="left")
+
+    if combo_summary.empty:
+        ranking = pd.DataFrame()
+    else:
+        ranking = combo_summary.copy()
+        for col in ["clean_psnr_mean", "clean_ssim_mean", "clean_nc_mean", "clean_ber_mean", "mean_attack_nc", "mean_attack_ber", "min_attack_nc"]:
+            if col not in ranking.columns:
+                ranking[col] = np.nan
+        # If --attack-preset none is used, rank using clean NC/BER so smoke tests still produce a meaningful table.
+        effective_nc = ranking["mean_attack_nc"].where(ranking["mean_attack_nc"].notna(), ranking["clean_nc_mean"])
+        effective_ber = ranking["mean_attack_ber"].where(ranking["mean_attack_ber"].notna(), ranking["clean_ber_mean"])
+        ranking["balanced_score"] = effective_nc + 0.01 * ranking["clean_psnr_mean"].fillna(0.0) - 0.5 * effective_ber.fillna(1.0)
+        ranking["rank_balanced"] = ranking["balanced_score"].rank(ascending=False, method="min").astype(int)
+        ranking["rank_robustness"] = effective_nc.rank(ascending=False, method="min").astype(int)
+        ranking["rank_imperceptibility"] = ranking["clean_psnr_mean"].rank(ascending=False, method="min").astype(int)
+        ranking = ranking.sort_values(["rank_balanced", "rank_robustness", "rank_imperceptibility", "sweep_index"]).reset_index(drop=True)
+
+    return summary, combo_summary, ranking
+
+
+def run_proposal_hparam_sweep_phase(
+    *,
+    host_dir: str | Path,
+    watermark_path: str | Path,
+    output_dir: str | Path,
+    q4_tau_values: list[float],
+    q4_margin_values: list[float],
+    h01_q_values: list[float],
+    h01_margin_values: list[float],
+    max_images: int | None = None,
+    save_outputs: bool = False,
+    invert_watermark: bool = False,
+    attack_preset: str = "lite",
+    repeat: int | None = None,
+    max_combinations: int | None = None,
+) -> dict[str, Any]:
+    """Grid-sweep the proposal's four Tier-1 robustness/imperceptibility parameters.
+
+    The proposal algorithm is unchanged. Each setting is passed as explicit
+    ProposalParams to the existing benchmark runner. The optimized-parameter
+    JSON is intentionally not loaded here, because this phase is meant to study
+    the default Tier-1 parameter space directly.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not q4_tau_values or not q4_margin_values or not h01_q_values or not h01_margin_values:
+        raise ValueError("All proposal hparam sweep lists must be non-empty.")
+
+    combos = list(itertools.product(q4_tau_values, q4_margin_values, h01_q_values, h01_margin_values))
+    if max_combinations is not None:
+        combos = combos[: int(max_combinations)]
+    if not combos:
+        raise ValueError("No proposal hyperparameter combinations to run.")
+
+    all_results: list[pd.DataFrame] = []
+    all_summaries: list[pd.DataFrame] = []
+    all_comparisons: list[pd.DataFrame] = []
+    failures: list[dict[str, Any]] = []
+    manifest_rows: list[dict[str, Any]] = []
+
+    for idx, (q4_tau, q4_margin, h01_q, h01_margin) in enumerate(combos, start=1):
+        requested_params = {
+            "repeat": repeat,
+            "dwt_mode": "pywt",
+            "q4_tau": float(q4_tau),
+            "q4_margin": float(q4_margin),
+            "h01_q": float(h01_q),
+            "h01_margin": float(h01_margin),
+        }
+        effective_params = ProposalParams.from_dict(requested_params)
+        combo_id = _format_hparam_combo_id(idx, effective_params)
+        combo_out = output_dir / "runs" / combo_id
+        print(
+            "[HPARAM-SWEEP] "
+            f"{idx}/{len(combos)}: "
+            f"q4_tau={effective_params.q4_tau:.4f}, "
+            f"q4_margin={effective_params.q4_margin:.4f}, "
+            f"h01_q={effective_params.h01_q:.4f}, "
+            f"h01_margin={effective_params.h01_margin:.4f}"
+        )
+
+        result = run_benchmark(
+            host_dir=host_dir,
+            watermark_path=watermark_path,
+            output_dir=combo_out,
+            selected_methods=["proposal"],
+            max_images=max_images,
+            save_outputs=save_outputs,
+            invert_watermark=invert_watermark,
+            attack_preset=attack_preset,
+            proposal_options={
+                "use_optimizer": False,
+                "optimizer_trials": 0,
+                "params": effective_params.to_dict(),
+                "optimized_payload": None,
+            },
+            baseline_modes={},
+            guo_options={},
+            gaata_options={},
+        )
+
+        metadata = {
+            "sweep_combo_id": combo_id,
+            "sweep_index": int(idx),
+            "q4_tau_requested": float(q4_tau),
+            "q4_margin_requested": float(q4_margin),
+            "h01_q_requested": float(h01_q),
+            "h01_margin_requested": float(h01_margin),
+            "q4_tau_effective": float(effective_params.q4_tau),
+            "q4_margin_effective": float(effective_params.q4_margin),
+            "h01_q_effective": float(effective_params.h01_q),
+            "h01_margin_effective": float(effective_params.h01_margin),
+            "h01_margin_was_clipped": bool(float(effective_params.h01_margin) != float(h01_margin)),
+            "repeat_requested": "full" if repeat is None else int(repeat),
+        }
+
+        for key in ["results", "summary", "comparison"]:
+            df = result.get(key)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                df = df.copy()
+                for mkey, mval in metadata.items():
+                    df[mkey] = mval
+                if key == "results":
+                    all_results.append(df)
+                elif key == "summary":
+                    all_summaries.append(df)
+                else:
+                    all_comparisons.append(df)
+
+        for rec in result.get("failures", []):
+            rec2 = dict(rec)
+            rec2.update(metadata)
+            failures.append(rec2)
+
+        manifest_rows.append({
+            **metadata,
+            "params_json": json.dumps(effective_params.to_dict(), ensure_ascii=False, default=_json_default),
+            "output_dir": str(combo_out),
+        })
+
+    results_df = pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame()
+    raw_summary_df = pd.concat(all_summaries, ignore_index=True) if all_summaries else pd.DataFrame()
+    comparison_df = pd.concat(all_comparisons, ignore_index=True) if all_comparisons else pd.DataFrame()
+    manifest_df = pd.DataFrame(manifest_rows)
+    summary_df, combo_summary_df, ranking_df = _summarize_proposal_hparam_sweep(results_df)
+
+    paths = {
+        "results": output_dir / "proposal_hparam_sweep_per_image_attack_results.csv",
+        "raw_summary": output_dir / "proposal_hparam_sweep_raw_summary_by_method_phase.csv",
+        "summary": output_dir / "proposal_hparam_sweep_summary_by_combo_phase.csv",
+        "combo_summary": output_dir / "proposal_hparam_sweep_summary_by_combo.csv",
+        "ranking": output_dir / "proposal_hparam_sweep_ranking.csv",
+        "comparison": output_dir / "proposal_hparam_sweep_compare_before_after.csv",
+        "manifest": output_dir / "proposal_hparam_sweep_manifest.csv",
+        "failures": output_dir / "proposal_hparam_sweep_failures.json",
+        "best": output_dir / "proposal_hparam_sweep_best.json",
+    }
+    results_df.to_csv(paths["results"], index=False)
+    raw_summary_df.to_csv(paths["raw_summary"], index=False)
+    summary_df.to_csv(paths["summary"], index=False)
+    combo_summary_df.to_csv(paths["combo_summary"], index=False)
+    ranking_df.to_csv(paths["ranking"], index=False)
+    comparison_df.to_csv(paths["comparison"], index=False)
+    manifest_df.to_csv(paths["manifest"], index=False)
+    with open(paths["failures"], "w", encoding="utf-8") as f:
+        json.dump(failures, f, indent=2, ensure_ascii=False, default=_json_default)
+
+    best_payload = {
+        "format": "watermarklab_proposal_hparam_sweep_v1",
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "host_dir": str(host_dir),
+        "watermark_path": str(watermark_path),
+        "attack_preset": str(attack_preset),
+        "repeat": "full" if repeat is None else int(repeat),
+        "total_combinations": int(len(combos)),
+        "default_sweep_values": {
+            "q4_tau": [float(x) for x in q4_tau_values],
+            "q4_margin": [float(x) for x in q4_margin_values],
+            "h01_q": [float(x) for x in h01_q_values],
+            "h01_margin": [float(x) for x in h01_margin_values],
+        },
+        "best_balanced": None,
+        "best_robustness": None,
+        "best_imperceptibility": None,
+    }
+    if not ranking_df.empty:
+        best_payload["best_balanced"] = ranking_df.iloc[0].to_dict()
+        best_payload["best_robustness"] = ranking_df.sort_values(["rank_robustness", "rank_balanced", "sweep_index"]).iloc[0].to_dict()
+        best_payload["best_imperceptibility"] = ranking_df.sort_values(["rank_imperceptibility", "rank_balanced", "sweep_index"]).iloc[0].to_dict()
+    with open(paths["best"], "w", encoding="utf-8") as f:
+        json.dump(best_payload, f, indent=2, ensure_ascii=False, default=_json_default)
+
+    print(f"Saved proposal hparam sweep results to: {paths['results']}")
+    print(f"Saved proposal hparam sweep combo summary to: {paths['combo_summary']}")
+    print(f"Saved proposal hparam sweep ranking to: {paths['ranking']}")
+    if not ranking_df.empty:
+        show_cols = [
+            "sweep_combo_id",
+            "q4_tau_effective",
+            "q4_margin_effective",
+            "h01_q_effective",
+            "h01_margin_effective",
+            "clean_psnr_mean",
+            "mean_attack_nc",
+            "mean_attack_ber",
+            "balanced_score",
+            "rank_balanced",
+        ]
+        print(ranking_df[[c for c in show_cols if c in ranking_df.columns]].head(10).to_string(index=False))
+    if failures:
+        print(f"Hparam sweep failures: {len(failures)}. See proposal_hparam_sweep_failures.json")
+
+    return {
+        "results": results_df,
+        "raw_summary": raw_summary_df,
+        "summary": summary_df,
+        "summary_by_combo": combo_summary_df,
+        "ranking": ranking_df,
+        "comparison": comparison_df,
+        "manifest": manifest_df,
+        "failures": failures,
+        "best": best_payload,
+    }
 
 
 def _parse_proposal_ablation_variants(raw: str | list[str] | None) -> list[str]:
@@ -1746,7 +2101,7 @@ def run_proposal_size_sweep_phase(
 
 def main():
     parser = argparse.ArgumentParser(description="Run the cleaned watermarking benchmark on 512x512 RGB host images and a 64x64 binary watermark.")
-    parser.add_argument("--phase", default="normal", choices=["normal", "optimize", "optimization", "proposal-plot", "proposal_plot", "plot-proposal", "proposal-ablation", "proposal_ablation", "ablation", "proposal-size-sweep", "proposal_size_sweep", "size-sweep"], help="normal: run benchmark; optimize: search/export parameters; proposal-plot: generate NC-vs-attack plots; proposal-ablation: run proposal component ablations; proposal-size-sweep: run the proposal over multiple resized host/watermark sizes.")
+    parser.add_argument("--phase", default="normal", choices=["normal", "optimize", "optimization", "proposal-plot", "proposal_plot", "plot-proposal", "proposal-ablation", "proposal_ablation", "ablation", "proposal-size-sweep", "proposal_size_sweep", "size-sweep", "proposal-hparam-sweep", "proposal_hparam_sweep", "hparam-sweep"], help="normal: run benchmark; optimize: search/export parameters; proposal-plot: generate NC-vs-attack plots; proposal-ablation: run proposal component ablations; proposal-size-sweep: run the proposal over multiple resized host/watermark sizes; proposal-hparam-sweep: grid sweep Tier-1 proposal hyperparameters q4_tau, q4_margin, h01_q, h01_margin.")
     parser.add_argument("--host-dir", default="data/host")
     parser.add_argument("--watermark", default="data/watermark/wm.png")
     parser.add_argument("--output", default="results/common_benchmark")
@@ -1820,6 +2175,11 @@ def main():
     parser.add_argument("--size-sweep-watermark-sizes", default="32,64,128", help="Comma-separated square watermark sizes for proposal-size-sweep. Watermarks are resized in memory only.")
     parser.add_argument("--size-sweep-watermarks", default="", help="Optional comma-separated watermark files or folders for proposal-size-sweep. Empty uses --watermark.")
     parser.add_argument("--size-sweep-dpi", type=int, default=180, help="DPI for proposal-size-sweep PNG plots.")
+    parser.add_argument("--hparam-sweep-q4-tau", default="0.35,0.40,0.45,0.50,0.55,0.60,0.65", help="Comma-separated q4_tau values for proposal-hparam-sweep.")
+    parser.add_argument("--hparam-sweep-q4-margin", default="0.04,0.06,0.08,0.10,0.12,0.14", help="Comma-separated q4_margin values for proposal-hparam-sweep.")
+    parser.add_argument("--hparam-sweep-h01-q", default="5,6,7,8,9,10", help="Comma-separated h01_q values for proposal-hparam-sweep.")
+    parser.add_argument("--hparam-sweep-h01-margin", default="0.50,0.70,0.90,1.10,1.20", help="Comma-separated h01_margin values for proposal-hparam-sweep. Effective values are clipped to <= 0.49*h01_q.")
+    parser.add_argument("--hparam-sweep-max-combinations", type=int, default=None, help="Optional debug limit for proposal-hparam-sweep; default runs the full grid.")
 
     args = parser.parse_args()
     fireflies = int(args.proposal_optimizer_fireflies if args.proposal_optimizer_fireflies is not None else args.proposal_optimizer_trials)
@@ -1913,6 +2273,7 @@ def main():
         "proposal-ablation", "proposal_ablation", "ablation",
         "proposal-plot", "proposal_plot", "plot-proposal",
         "proposal-size-sweep", "proposal_size_sweep", "size-sweep",
+        "proposal-hparam-sweep", "proposal_hparam_sweep", "hparam-sweep",
     }
 
     guo_optimized_payload = None
@@ -1996,6 +2357,24 @@ def main():
             attack_preset=args.attack_preset,
             proposal_options=proposal_options,
             dpi=int(args.size_sweep_dpi),
+        )
+        return
+
+    if args.phase in {"proposal-hparam-sweep", "proposal_hparam_sweep", "hparam-sweep"}:
+        run_proposal_hparam_sweep_phase(
+            host_dir=args.host_dir,
+            watermark_path=args.watermark,
+            output_dir=args.output,
+            q4_tau_values=_parse_csv_values(args.hparam_sweep_q4_tau, float),
+            q4_margin_values=_parse_csv_values(args.hparam_sweep_q4_margin, float),
+            h01_q_values=_parse_csv_values(args.hparam_sweep_h01_q, float),
+            h01_margin_values=_parse_csv_values(args.hparam_sweep_h01_margin, float),
+            max_images=args.max_images,
+            save_outputs=not args.no_save_images,
+            invert_watermark=args.invert_watermark,
+            attack_preset=args.attack_preset,
+            repeat=repeat_value,
+            max_combinations=args.hparam_sweep_max_combinations,
         )
         return
 
