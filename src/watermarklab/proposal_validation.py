@@ -44,7 +44,7 @@ def proposal_notebook_contract() -> dict[str, Any]:
         "arnold_iterations": 17,
         "dwt_wavelet": "haar",
         "dwt_level": 1,
-        "dwt_mode": "orthonormal",
+        "dwt_mode": "pywt",
         "dwt_bands": ("LL", "HL", "HH", "LH"),
         "host_channels": (0,),
         "flag_q4": 0,
