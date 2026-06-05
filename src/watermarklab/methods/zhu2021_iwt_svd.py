@@ -191,7 +191,7 @@ class Zhu2021IWTSVD:
         block_size: int | None = None,
         affine_params: tuple[int, int, int, int, int, int] = (1, 1, 1, 2, 0, 0),
         affine_iterations: int = 10,
-        color_mode: str = "ycbcr_y",
+        color_mode: str = "auto",
     ):
         self.mode = str(mode).lower().strip()
         # Native Zhu is 32x32 grayscale.  The default benchmark adapter is 64x64
@@ -213,9 +213,6 @@ class Zhu2021IWTSVD:
         self.affine_params = tuple(int(v) for v in affine_params)
         self.affine_iterations = int(affine_iterations)
         self.color_mode = str(color_mode if color_mode != "auto" else self.default_color_mode)
-        if color_mode == "ycbcr_y" and self.mode in {"paper", "original", "original-rerun"}:
-            # Keep explicit user choice if provided; otherwise use gray_mean.
-            self.color_mode = str(color_mode)
         if self.delta <= 0:
             raise ValueError("Zhu2021 IWT-SVD delta must be positive")
         if self.block_size % 2 != 0 or self.block_size < 4:

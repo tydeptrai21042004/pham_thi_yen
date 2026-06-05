@@ -18,7 +18,7 @@ def test_proposal_size_sweep_phase_smoke(tmp_path):
         max_images=1,
         save_outputs=False,
         attack_preset="lite",
-        proposal_options={"params": {"repeat": None, "dwt_mode": "pywt"}},
+        proposal_options={"params": {"repeat": 1, "dwt_mode": "pywt"}},
         dpi=80,
     )
 
@@ -63,11 +63,13 @@ def test_proposal_size_sweep_cli_smoke(tmp_path):
         "80",
         "--proposal-param-mode",
         "ignore",
+        "--proposal-repeat",
+        "1",
     ]
     import os
     env = os.environ.copy()
     env["PYTHONPATH"] = str(root / "src")
-    completed = subprocess.run(cmd, cwd=root, text=True, capture_output=True, check=True, env=env)
+    completed = subprocess.run(cmd, cwd=root, text=True, capture_output=True, check=True, env=env, timeout=120)
     assert "Saved proposal size-sweep summary" in completed.stdout
     assert (out / "proposal_size_sweep_clean_results.csv").exists()
     assert (out / "proposal_size_sweep_attack_results.csv").exists()

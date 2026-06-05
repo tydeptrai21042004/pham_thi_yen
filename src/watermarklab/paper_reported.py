@@ -160,7 +160,10 @@ def write_paper_reported(output_dir: str | Path, method_ids: list[str] | None = 
     df = paper_reported_dataframe(method_ids)
     df.to_csv(output / "paper_reported_results.csv", index=False)
     if not df.empty:
-        summary = df.groupby(["method_id", "phase", "metric"], dropna=False)["value"].agg(["count", "mean", "min", "max"]).reset_index()
+        df_summary = df.copy()
+        df_summary["numeric_value"] = pd.to_numeric(df_summary["value"], errors="coerce")
+        numeric = df_summary.dropna(subset=["numeric_value"])
+        summary = numeric.groupby(["method_id", "phase", "metric"], dropna=False)["numeric_value"].agg(["count", "mean", "min", "max"]).reset_index()
         summary.to_csv(output / "paper_reported_summary.csv", index=False)
     (output / "README_ORIGINAL_MODE.md").write_text(
         "# Original reported mode\n\n"
