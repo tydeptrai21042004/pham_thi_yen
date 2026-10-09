@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 import hashlib
 import math
 import random
+import os
+import warnings
 from typing import Any
 
 import cv2
@@ -65,7 +67,9 @@ Q4_GIVENS_FINE_STEPS = 0
 Q4_GIVENS_PASSES = 1
 Q4_GIVENS_MSE_WEIGHT = 0.10
 Q4_GIVENS_EXTRA_MARGIN_WEIGHT = 0.04
-Q4_GIVENS_PAIRS = ((0, 2), (1, 3), (0, 1), (1, 2))
+# (1,2) is intentionally excluded: rotating those two rows preserves
+# q[1,1]**2 + q[2,1]**2 and cannot change the Q-branch decision statistic.
+Q4_GIVENS_PAIRS = ((0, 2), (1, 3), (0, 1))
 
 FAST_CANDIDATE_SCORING = True
 USE_STRUCTURED_REPETITION = True
@@ -125,6 +129,10 @@ class ProposalParams:
     q4_givens_pairs: tuple[tuple[int, int], ...] = Q4_GIVENS_PAIRS
     fast_candidate_scoring: bool = FAST_CANDIDATE_SCORING
 
+    # Optional experimental mode: do not treat a pre-existing decoded bit as
+    # evidence of embedding. This trades capacity for contrast against originals.
+    # Legacy mode remains default for honest reproduction of manuscript tables.
+    require_contrastive_embedding: bool = False
     watermark_dwt_enabled: bool = True
     watermark_payload_band: str = "LL"
     host_embed_color_space: str = HOST_EMBED_COLOR_SPACE
@@ -204,6 +212,9 @@ class ProposalKey:
     usable_blocks: int
     total_blocks: int
     support_counts: list[int] = field(default_factory=list)
+    embedding_errors: list[str] = field(default_factory=list)
+    selected_bss: list[float] = field(default_factory=list)
+    selected_mse: list[float] = field(default_factory=list)
     # Kept for compatibility/debugging.  Extraction regenerates the schedule
     # from the key and image, matching the standalone script behavior.
     schedule: list[tuple[int, int, str, int, int]] = field(default_factory=list)
@@ -212,6 +223,28 @@ class ProposalKey:
     def wm_shape(self) -> tuple[int, int]:
         return tuple(int(x) for x in self.payload_meta.get("wm_shape", (WM_SIZE, WM_SIZE)))
 
+
+@dataclass
+class PayloadDecodeResult:
+    bits: np.ndarray
+    valid_mask: np.ndarray
+    vote_counts: np.ndarray
+    confidence: np.ndarray
+    tie_mask: np.ndarray
+    errors: list[str] = field(default_factory=list)
+    metadata_model: str = "unspecified"
+
+    @property
+    def coverage(self) -> float:
+        return float(np.mean(self.valid_mask)) if self.valid_mask.size else 0.0
+
+    @property
+    def erasures(self) -> int:
+        return int(np.count_nonzero(self.vote_counts == 0))
+
+    @property
+    def ties(self) -> int:
+        return int(np.count_nonzero(self.tie_mask))
 
 # =========================================================
 # JSON / numeric helpers
@@ -324,8 +357,9 @@ def _dwt_split_4bands(channel_f64: np.ndarray, params: ProposalParams):
         if pywt is not None:
             LL, (LH, HL, HH) = pywt.dwt2(np.asarray(channel_f64, dtype=np.float64), DWT_WAVELET)
             return {"LL": LL.copy(), "LH": LH.copy(), "HL": HL.copy(), "HH": HH.copy()}
-        # Fallback for environments that have not installed PyWavelets yet.
-        # requirements.txt/pyproject.toml include PyWavelets, so normal runs use pywt.
+        if os.environ.get("WATERMARKLAB_STRICT_PYWT") == "1":
+            raise ImportError("PyWavelets is required for reproducibility mode; install requirements.txt")
+        warnings.warn("PyWavelets unavailable: explicit orthonormal Haar fallback in use; set WATERMARKLAB_STRICT_PYWT=1 for strict runs", RuntimeWarning, stacklevel=2)
         return split_4bands(channel_f64, mode="orthonormal")
     return split_4bands(channel_f64, mode=params.dwt_mode)
 
@@ -334,6 +368,9 @@ def _dwt_merge_4bands(bands: dict[str, np.ndarray], params: ProposalParams):
     if str(params.dwt_mode).lower() in {"pywt", "pywt_haar", "script", "source"}:
         if pywt is not None:
             return pywt.idwt2((bands["LL"], (bands["LH"], bands["HL"], bands["HH"])), DWT_WAVELET)
+        if os.environ.get("WATERMARKLAB_STRICT_PYWT") == "1":
+            raise ImportError("PyWavelets is required for reproducibility mode; install requirements.txt")
+        warnings.warn("PyWavelets unavailable: explicit orthonormal Haar fallback in use; set WATERMARKLAB_STRICT_PYWT=1 for strict runs", RuntimeWarning, stacklevel=2)
         return merge_4bands(bands, mode="orthonormal")
     return merge_4bands(bands, mode=params.dwt_mode)
 
@@ -693,8 +730,15 @@ def _candidate_attack_score(block0: np.ndarray, block_cand: np.ndarray, mode: in
             pass
 
     survival_rate = float(pass_count / max(total_count, 1))
-    ok = survival_rate >= float(params.min_survival_rate)
-    return survival_rate, mse, survival_rate, survival_rate, survival_rate, ok
+    # The no-attack candidate is a mandatory validity condition, not merely one
+    # vote in the empirical BSS score.  An invalid clean candidate must never
+    # enter the selector (including the no-strength-filter ablation).
+    try:
+        exact_valid = int(_extract_bit_from_candidate_block(base, mode, params, pos=pos)) == int(bit)
+    except (ValueError, np.linalg.LinAlgError, FloatingPointError):
+        exact_valid = False
+    ok = exact_valid and survival_rate >= float(params.min_survival_rate)
+    return survival_rate, mse, float(exact_valid), survival_rate, survival_rate, ok
 
 
 def _candidate_mse_limit(cand: dict, params: ProposalParams) -> float:
@@ -717,7 +761,7 @@ def _candidate_rank_key(cand: dict, params: ProposalParams):
 
 
 def _candidate_is_strong_enough(cand: dict, params: ProposalParams) -> bool:
-    if not bool(cand["ok"]):
+    if not bool(cand.get("raw", 0.0)) or not bool(cand["ok"]):
         return False
     if float(cand["score"]) < float(params.min_survival_rate):
         return False
@@ -765,7 +809,8 @@ def _select_candidate_for_ablation(cands: list[dict], params: ProposalParams) ->
 
     mode = str(getattr(params, "candidate_selection_mode", "bss_mse")).lower().strip()
     if mode in {"no_strength_filter", "unfiltered", "raw"}:
-        pool = list(cands)
+        # Removing the strength filter must not remove fundamental decodability.
+        pool = [c for c in cands if bool(c.get("raw", 0.0))]
     else:
         pool = [c for c in cands if _candidate_is_strong_enough(c, params)]
 
@@ -859,6 +904,8 @@ class ProposalQHDWTHess:
         optimizer_seed: int = 123,
     ):
         self.params = params if isinstance(params, ProposalParams) else ProposalParams.from_dict(params)
+        if int(self.params.block_size) != 4:
+            raise NotImplementedError("Q/H coefficient selectors and Givens search are 4x4-specific; a block-size study needs a separately validated generalized encoder")
         self.use_optimizer = bool(use_optimizer)
         self.optimizer_trials = int(optimizer_trials)
         self.optimizer_seed = int(optimizer_seed)
@@ -898,6 +945,9 @@ class ProposalQHDWTHess:
             repeat_arg = params.repeat
         schedule, repeat_factor, usable_blocks = _make_structured_schedule(positions, L, repeat_arg)
 
+        embedding_errors: list[str] = []
+        selected_bss: list[float] = []
+        selected_mse: list[float] = []
         flags: list[int] = []
         hpos_list: list[int] = []
         support_counts = np.zeros(L, dtype=np.int32)
@@ -931,19 +981,43 @@ class ProposalQHDWTHess:
                 if bool(params.hpos_enabled):
                     cands.append(_best_hpos_candidate(block0, bit, params))
 
+                if params.require_contrastive_embedding:
+                    # Reject configurations that already decode as the target
+                    # in the unmodified host block. Otherwise a key derived
+                    # during embedding can 'recognize' an unmarked original.
+                    contrastive = []
+                    for cand in cands:
+                        p0 = (HPOS_CANDIDATES[int(cand["hpos_idx"])][1]
+                              if cand["flag"] == FLAG_HPOS else None)
+                        try:
+                            old_bit = _extract_bit_from_candidate_block(block0, cand["flag"], params, pos=p0)
+                            if old_bit != bit and cand["mse"] > 1e-12:
+                                contrastive.append(cand)
+                        except (ValueError, ArithmeticError, np.linalg.LinAlgError):
+                            pass
+                    cands = contrastive
                 best = _select_candidate_for_ablation(cands, params)
                 if best is not None:
                     band[i : i + bs, j : j + bs] = best["block"]
                     flags.append(int(best["flag"]))
                     hpos_list.append(int(best.get("hpos_idx", HPOS_NONE)))
+                    selected_bss.append(float(best["score"]))
+                    selected_mse.append(float(best["mse"]))
                     support_counts[kpos] += 1
                     support_sel_sum[kpos] += float(_combined_selection_score(best, params))
                 else:
                     flags.append(FLAG_SKIP)
                     hpos_list.append(HPOS_NONE)
-            except Exception:
+                    selected_bss.append(float("nan"))
+                    selected_mse.append(float("nan"))
+            except (ValueError, ArithmeticError, np.linalg.LinAlgError) as exc:
+                # Keep the experiment running but disclose recoverable numerical failures.
+                if len(embedding_errors) < 50:
+                    embedding_errors.append(f"block {len(flags)}: {type(exc).__name__}: {exc}")
                 flags.append(FLAG_SKIP)
                 hpos_list.append(HPOS_NONE)
+                selected_bss.append(float("nan"))
+                selected_mse.append(float("nan"))
 
         watermarked_embed = host_embed_orig.copy()
         for ch in params.host_channels:
@@ -965,6 +1039,7 @@ class ProposalQHDWTHess:
                 "hpos_enabled": bool(params.hpos_enabled),
                 "arnold_enabled": bool(params.arnold_enabled),
                 "candidate_selection_mode": str(params.candidate_selection_mode),
+                "contrastive_mode": bool(params.require_contrastive_embedding),
                 "watermark_dwt_enabled_param": bool(params.watermark_dwt_enabled),
                 "structured_repeat_factor": int(repeat_factor),
                 "structured_usable_blocks": int(usable_blocks),
@@ -979,6 +1054,7 @@ class ProposalQHDWTHess:
                 "parameter_snapshot": _to_json_safe(params.to_dict()),
                 "block_hash": "SHA-256",
                 "h_candidates": [name for name, _ in HPOS_CANDIDATES],
+                "embedding_error_count_sampled": int(len(embedding_errors)),
                 "weighted_voting_removed": True,
                 "confidence_scoring_removed": True,
                 "bit_survival_score": "BSS = passed_stress_tests / total_stress_tests",
@@ -996,6 +1072,9 @@ class ProposalQHDWTHess:
             usable_blocks=int(usable_blocks),
             total_blocks=int(len(positions)),
             support_counts=support_counts.astype(int).tolist(),
+            embedding_errors=embedding_errors,
+            selected_bss=selected_bss,
+            selected_mse=selected_mse,
             schedule=schedule,
         )
         return watermarked_rgb, key
@@ -1196,71 +1275,80 @@ class ProposalQHDWTHess:
         params = self._quick_optimize_params(host_rgb, watermark_binary) if self.use_optimizer else self.params
         return self._embed_with_params(host_rgb, watermark_binary, params)
 
-    def _extract_payload_bits_from_rgb(self, possibly_attacked_rgb: np.ndarray, key: ProposalKey):
+    def extract_payload_diagnostics(self, possibly_attacked_rgb: np.ndarray, key: ProposalKey) -> "PayloadDecodeResult":
+        """Recover the *embedded payload* and expose erasures, ties and vote counts.
+
+        Note that coverage/majority agreement is NOT a calibrated watermark-
+        presence decision. Metadata can be host-dependent and must be analyzed
+        using original-host and unrelated-host negative controls.
+        """
         params = key.params
         payload_meta = key.payload_meta
         payload_len = int(payload_meta["payload_len"])
-        dwt_bands_for_meta = tuple(payload_meta.get("dwt_bands", params.dwt_bands))
-
+        if payload_len <= 0:
+            raise ValueError("Invalid payload length in key")
         img_bgr = _rgb_to_source_bgr(possibly_attacked_rgb)
         embed_img = _host_bgr_to_embed_space(img_bgr)
         _, H0, W0 = _crop_for_dwt(embed_img[:, :, int(params.host_channels[0])], DWT_LEVEL, params.block_size)
-        work_raw_u8 = embed_img[:H0, :W0, :].copy()
-
         local_params = ProposalParams.from_dict(params.to_dict())
-        local_params.dwt_bands = tuple(dwt_bands_for_meta)
-        bands_by_ch: dict[int, dict[str, np.ndarray]] = {}
-        for ch in local_params.host_channels:
-            bands_by_ch[int(ch)] = _dwt_split_4bands(work_raw_u8[:, :, int(ch)].astype(np.float64), local_params)
-
+        local_params.dwt_bands = tuple(payload_meta.get("dwt_bands", params.dwt_bands))
+        bands_by_ch = {int(ch): _dwt_split_4bands(embed_img[:H0, :W0, int(ch)].astype(np.float64), local_params)
+                       for ch in local_params.host_channels}
         positions = _shuffle_positions(_all_block_positions(bands_by_ch, local_params), local_params.private_key)
-        if payload_meta.get("structured_repetition_enabled", True):
-            schedule, repeat_factor, usable_blocks = _make_structured_schedule(positions, payload_len, None)
-        else:
-            schedule, repeat_factor, usable_blocks = _make_structured_schedule(positions, payload_len, 1)
+        requested_repeat = payload_meta.get("structured_repeat_factor", key.repeat_factor)
+        schedule, actual_repeat, _ = _make_structured_schedule(positions, payload_len, int(requested_repeat))
+        if actual_repeat != int(requested_repeat):
+            raise ValueError("Incompatible image dimensions or repetition schedule")
+        if len(key.flags) != len(schedule) or len(key.hpos_list) != len(schedule):
+            raise ValueError("Corrupted side information: flag/schedule length mismatch")
+        # Preserve the metadata dimensions and refuse an attack that changes
+        # the image's block geometry rather than silently shifting schedules.
+        if int(key.total_blocks) != len(positions):
+            raise ValueError("Incompatible embedding block geometry")
 
-        n = min(len(schedule), len(key.flags), len(key.hpos_list))
-        votes = [[] for _ in range(payload_len)]
+        counts_one = np.zeros(payload_len, dtype=np.int32)
+        counts_zero = np.zeros(payload_len, dtype=np.int32)
+        errors: list[str] = []
         bs = int(local_params.block_size)
-
-        for idx in range(n):
-            kpos, ch, band_name, i, j = schedule[idx]
+        for idx, (kpos, ch, band_name, i, j) in enumerate(schedule):
             flag = int(key.flags[idx])
             if flag == FLAG_SKIP:
                 continue
             try:
-                block = bands_by_ch[int(ch)][band_name][i : i + bs, j : j + bs]
+                block = bands_by_ch[int(ch)][band_name][i:i+bs, j:j+bs]
                 if block.shape != (bs, bs):
-                    continue
+                    raise ValueError("invalid block dimensions")
                 if flag == FLAG_Q4:
-                    extracted_bit = _extract_bit_from_candidate_block(block, FLAG_Q4, local_params)
+                    bit = _extract_bit_from_candidate_block(block, FLAG_Q4, local_params)
                 elif flag == FLAG_HPOS:
-                    hpos_idx = int(key.hpos_list[idx]) if idx < len(key.hpos_list) else HPOS_NONE
+                    hpos_idx = int(key.hpos_list[idx])
                     if not (0 <= hpos_idx < len(HPOS_CANDIDATES)):
-                        continue
-                    _, pos = HPOS_CANDIDATES[hpos_idx]
-                    extracted_bit = _extract_bit_from_candidate_block(block, FLAG_HPOS, local_params, pos=pos)
+                        raise ValueError("invalid H coefficient index")
+                    bit = _extract_bit_from_candidate_block(block, FLAG_HPOS, local_params, pos=HPOS_CANDIDATES[hpos_idx][1])
                 else:
-                    continue
-                votes[int(kpos)].append(int(extracted_bit))
-            except Exception:
-                continue
+                    raise ValueError("unknown mode flag")
+                if bit:
+                    counts_one[kpos] += 1
+                else:
+                    counts_zero[kpos] += 1
+            except (ValueError, ArithmeticError, np.linalg.LinAlgError) as exc:
+                if len(errors) < 50:
+                    errors.append(f"vote {idx}: {type(exc).__name__}: {exc}")
+        counts = counts_one + counts_zero
+        valid = counts > 0
+        ties = valid & (counts_one == counts_zero)
+        bits = (counts_one > counts_zero).astype(np.uint8)
+        # Missing bits/ties remain explicitly marked in ``valid_mask``.
+        # A deterministic zero is output for legacy extract() compatibility.
+        valid &= ~ties
+        confidence = np.divide(np.abs(counts_one-counts_zero), counts, out=np.zeros(payload_len, dtype=float), where=counts>0)
+        return PayloadDecodeResult(bits=bits, valid_mask=valid, vote_counts=counts,
+                                   confidence=confidence, tie_mask=ties,
+                                   errors=errors, metadata_model=str(payload_meta.get("watermark_payload_band", "unspecified")))
 
-        out_bits = np.zeros(payload_len, dtype=np.uint8)
-        valid_count = 0
-        total_votes = 0
-        for kpos, bit_votes in enumerate(votes):
-            if not bit_votes:
-                out_bits[kpos] = 0
-                continue
-            valid_count += 1
-            total_votes += len(bit_votes)
-            ones = int(np.sum(bit_votes))
-            zeros = len(bit_votes) - ones
-            out_bits[kpos] = 1 if ones >= zeros else 0
-
-        coverage = float(valid_count / payload_len) if payload_len > 0 else 0.0
-        return out_bits, coverage
+    def _extract_payload_bits_from_rgb(self, possibly_attacked_rgb: np.ndarray, key: ProposalKey):
+        result = self.extract_payload_diagnostics(possibly_attacked_rgb, key)
+        return result.bits, result.coverage
 
     def extract(self, possibly_attacked_rgb: np.ndarray, key: ProposalKey, host_rgb: np.ndarray | None = None):
         best_bits, _coverage = self._extract_payload_bits_from_rgb(possibly_attacked_rgb, key)
@@ -1272,6 +1360,7 @@ __all__ = [
     "ProposalQHDWTHess",
     "ProposalParams",
     "ProposalKey",
+    "PayloadDecodeResult",
     "FLAG_Q4",
     "FLAG_HPOS",
     "FLAG_SKIP",

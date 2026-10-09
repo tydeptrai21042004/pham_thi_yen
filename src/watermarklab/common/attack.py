@@ -47,9 +47,8 @@ def jpeg(image: Array, quality: int = 70, **kwargs) -> Array:
 def jpeg2000(image: Array, quality_layer: float = 7.0, quality: int | None = None, **kwargs) -> Array:
     """JPEG2000 compression attack.
 
-    Pillow support for JPEG2000 varies by environment. When JP2 cannot be
-    encoded/decoded, this falls back to JPEG at a comparable quality, keeping the
-    benchmark deterministic and testable.
+    JPEG2000 is a distinct attack. A missing codec is reported as an error,
+    never silently replaced by ordinary JPEG.
     """
     try:
         buf = io.BytesIO()
@@ -60,9 +59,8 @@ def jpeg2000(image: Array, quality_layer: float = 7.0, quality: int | None = Non
         )
         buf.seek(0)
         return np.asarray(Image.open(buf).convert("RGB"), dtype=np.uint8)
-    except Exception:
-        q = int(quality) if quality is not None else int(np.clip(100 - 8 * float(quality_layer), 10, 95))
-        return jpeg(image, quality=q)
+    except Exception as exc:
+        raise RuntimeError("JPEG2000 attack unavailable: Pillow/OpenJPEG failed; refusing JPEG substitution") from exc
 
 
 def gaussian_noise(image: Array, sigma: float = 5.0, seed: int = 123, **kwargs) -> Array:
@@ -838,8 +836,34 @@ def grid_attack_suite(include_none: bool = True) -> list[AttackConfig]:
         attacks.append(AttackConfig(f"grid_color_quantization_{colors}", "color_quantization", {"colors": colors}))
     return attacks if include_none else attacks[1:]
 
+def reviewer_stress_attack_suite(include_none: bool = True) -> list[AttackConfig]:
+    """Exact reviewer-requested strengths; variances use normalized [0,1] RGB.
+
+    Geometry is *not registered* against the original image. Tests of any
+    separate synchronization method must be reported in a different protocol.
+    """
+    attacks = [AttackConfig("no_attack", "none", {})]
+    for quality in (90, 70, 50, 40, 30):
+        attacks.append(AttackConfig(f"jpeg_q{quality}", "jpeg", {"quality": quality}))
+    for v in (0.003, 0.01, 0.03, 0.05):
+        attacks.append(AttackConfig(f"gaussian_var_{str(v).replace('.', 'p')}", "gaussian_noise_var", {"variance": v, "seed": 123}))
+    for v in (0.001, 0.01, 0.02, 0.03):
+        attacks.append(AttackConfig(f"speckle_var_{str(v).replace('.', 'p')}", "speckle_noise", {"variance": v, "seed": 123}))
+    for angle in (5, 10, 15, 30, 45):
+        attacks.append(AttackConfig(f"rotation_{angle}deg", "rotation", {"degrees": float(angle)}))
+    for factor in (0.5, 0.75, 1.25, 1.5):
+        attacks.append(AttackConfig(f"resize_{str(factor).replace('.', 'p')}", "resize", {"factor": factor}))
+    for keep in (0.95, 0.9, 0.8, 0.75):
+        attacks.append(AttackConfig(f"crop_resize_{str(keep).replace('.', 'p')}", "crop_resize", {"keep": keep}))
+    for dx, dy in ((5, 5), (-5, -5), (10, 0)):
+        attacks.append(AttackConfig(f"translation_{dx}_{dy}", "translation", {"shift_x": dx, "shift_y": dy}))
+    return attacks if include_none else attacks[1:]
+
+
 def default_attack_suite(include_none: bool = True, preset: str = "lite") -> list[AttackConfig]:
     preset = str(preset).lower().strip()
+    if preset in {"reviewer", "reviewer_stress", "revision"}:
+        return reviewer_stress_attack_suite(include_none=include_none)
     if preset in {"none", "clean", "no_attack"}:
         return [AttackConfig("no_attack", "none", {})] if include_none else []
     if preset in {"lite", "small", "quick"}:
