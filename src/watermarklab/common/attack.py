@@ -2,6 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Iterable
 import io
+import json
 import math
 import numpy as np
 from PIL import Image, ImageFilter, ImageOps, ImageEnhance
@@ -860,6 +861,28 @@ def reviewer_stress_attack_suite(include_none: bool = True) -> list[AttackConfig
     return attacks if include_none else attacks[1:]
 
 
+def reviewer_complete_full_attack_suite(include_none: bool = True) -> list[AttackConfig]:
+    """Full suite plus reviewer intensities, deduplicated by *actual operation*.
+
+    An identical JPEG2000 operation had previously appeared with two names.
+    Keeping both would double-weight that setting in aggregate NC and BER.
+    """
+    combined = full_attack_suite(True) + reviewer_stress_attack_suite(False)
+    seen_operations: set[tuple[str, str]] = set()
+    seen_names: set[str] = set()
+    unique: list[AttackConfig] = []
+    for cfg in combined:
+        signature = (cfg.group, json.dumps(cfg.params, sort_keys=True, separators=(",", ":")))
+        if signature in seen_operations:
+            continue
+        if cfg.name in seen_names:
+            raise ValueError(f"Attack name conflict: {cfg.name}")
+        seen_operations.add(signature)
+        seen_names.add(cfg.name)
+        unique.append(cfg)
+    return unique if include_none else [a for a in unique if a.group != "none"]
+
+
 def default_attack_suite(include_none: bool = True, preset: str = "lite") -> list[AttackConfig]:
     preset = str(preset).lower().strip()
     if preset in {"reviewer", "reviewer_stress", "revision"}:
@@ -869,7 +892,7 @@ def default_attack_suite(include_none: bool = True, preset: str = "lite") -> lis
     if preset in {"lite", "small", "quick"}:
         return lite_attack_suite(include_none=include_none)
     if preset in {"full", "all"}:
-        return full_attack_suite(include_none=include_none)
+        return reviewer_complete_full_attack_suite(include_none=include_none)
     if preset in {"stress", "hard", "proposal_stress"}:
         return stress_attack_suite(include_none=include_none)
     if preset in {"script", "source", "source_script"}:

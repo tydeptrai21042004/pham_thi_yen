@@ -14,6 +14,7 @@ import csv
 import json
 import time
 import traceback
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +83,27 @@ class ChunkySealAdapter:
         self.device = ("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device
         if self.device == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("CUDA requested for ChunkySeal but CUDA is unavailable")
+        # Upstream model cards point to configs/attenuation.yaml. Some pip builds
+        # omit this *data* file despite downloading the model checkpoint.
+        # Recover ONLY from an official source checkout, never invent a YAML.
+        package_dir = Path(videoseal.__file__).resolve().parent
+        required = package_dir / "configs" / "attenuation.yaml"
+        if not required.is_file():
+            candidates = [
+                package_dir.parent / "configs" / "attenuation.yaml",
+                Path.cwd() / "configs" / "attenuation.yaml",
+                Path.cwd() / "videoseal-src" / "configs" / "attenuation.yaml",
+                Path('/kaggle/working/videoseal-src/configs/attenuation.yaml'),
+            ]
+            available = next((p for p in candidates if p.is_file()), None)
+            if available is None:
+                raise RuntimeError(
+                    "VideoSeal's official configs/attenuation.yaml is missing. "
+                    "Clone facebookresearch/videoseal into /kaggle/working/videoseal-src "
+                    "and install it in editable mode before loading ChunkySeal."
+                )
+            required.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(available, required)
         self.model = videoseal.load("chunkyseal").eval().to(self.device)
         self.capacity = 1024
 

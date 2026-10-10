@@ -10,6 +10,7 @@ A high NC in an unwatermarked host is a failure signal, not a success.
 from __future__ import annotations
 import argparse
 import csv
+import copy
 from dataclasses import replace
 import hashlib
 import json
@@ -103,11 +104,23 @@ def audit(host_dir: Path, watermark_path: Path, output: Path, *, max_images: int
                 variants.append(("attack:"+att.name, apply_attack(marked, att)))
             except Exception as e:
                 rows.append({"host":path.name,"case":"attack:"+att.name,"error":str(e)})
-        for case, candidate in variants:
+        # Wrong-key test: change the actual schedule-generating secret in a
+        # copied key. This is not equivalent to simply rotating the watermark.
+        wrong_key = copy.deepcopy(key)
+        wrong_key.params.private_key = key.params.private_key + ":wrong-key-control"
+        variants.append(("wrong_secret_key", marked, wrong_key))
+        # Tampered metadata must be measured as a separate side-information
+        # integrity threat; it is not a pixel attack.
+        corrupted_key = copy.deepcopy(key)
+        corrupted_key.flags = list(corrupted_key.flags)[:-1]
+        variants.append(("corrupted_side_information", marked, corrupted_key))
+        for record in variants:
+            case, candidate = record[:2]
+            selected_key = record[2] if len(record)==3 else key
             t1 = time.perf_counter()
             try:
-                diag = method.extract_payload_diagnostics(candidate,key)
-                wm = method.extract(candidate,key)
+                diag = method.extract_payload_diagnostics(candidate,selected_key)
+                wm = method.extract(candidate,selected_key)
                 payload = binary_bit_metrics(truth,diag.bits,diag.valid_mask)
                 rows.append({"host":path.name,"case":case,**payload,
                              "watermark_ber":ber(watermark,wm),"watermark_nc":nc(watermark,wm),
@@ -127,7 +140,7 @@ def audit(host_dir: Path, watermark_path: Path, output: Path, *, max_images: int
                 rows.append({"host":path.name,"case":case,"error":repr(e)})
     write_csv(output/"per_case_results.csv",rows)
     manifest={"schema":"watermarklab-review-audit-v1","optimization":"disabled",
-              "negative_controls":"original image and different host under identical embedding-derived side information",
+              "negative_controls":"original, unrelated host, wrong secret key and corrupted side information",
               "detector_calibrated":False,"hosts":[str(x) for x in paths],"watermark":str(watermark_path),
               "watermark_sha256":hashlib.sha256(watermark.tobytes()).hexdigest(),
               "host_size":host_size,"watermark_size":watermark_size,"direct_binary":direct_binary,

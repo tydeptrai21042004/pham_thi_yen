@@ -631,8 +631,31 @@ def run_proposal_optimization_phase(
         rows.append(row)
         print(f"[OPT] {host_path.name}: objective={objective:.6f}, q4_tau={best_params.q4_tau:.6f}, q4_margin={best_params.q4_margin:.6f}, h01_q={best_params.h01_q:.6f}, h01_margin={best_params.h01_margin:.6f}")
 
+    # One frozen configuration for *all* held-out images. Select among the
+    # configurations discovered on training hosts by their mean training
+    # objective, rather than taking the largest score from one lucky host.
+    candidate_selection: list[dict[str, Any]] = []
+    for candidate_host in host_paths:
+        candidate_entry = per_image[candidate_host.stem]
+        candidate_params = ProposalParams.from_dict(candidate_entry["params"])
+        evaluator = ProposalQHDWTHess(params=candidate_params, use_optimizer=False)
+        outcomes=[]
+        for train_host in host_paths:
+            measure = evaluator._evaluate_params_for_optimization(
+                load_host_rgb(train_host), watermark, candidate_params, attack_suite=attack_suite)
+            outcomes.append(float(measure.get("objective", -1e9)))
+        average = float(np.mean(outcomes))
+        candidate_selection.append({"candidate_source":candidate_host.name,
+            "train_host_objectives":outcomes,"mean_train_objective":average,
+            "params":candidate_params.to_dict()})
+    winner = max(candidate_selection, key=lambda x:x["mean_train_objective"])
+    global_best = {"image":winner["candidate_source"],"filename":winner["candidate_source"],
+                   "params":winner["params"],"objective":winner["mean_train_objective"],
+                   "selection_rule":"maximum mean objective across all training hosts"}
+
     payload = {
         "format": OPT_PARAM_FORMAT,
+        "training_selection":candidate_selection,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "host_dir": str(host_dir),
         "watermark_path": str(watermark_path),
@@ -2113,7 +2136,7 @@ def main():
     parser.add_argument("--max-images", type=int, default=None, help="Optional quick-run limit.")
     parser.add_argument("--no-save-images", action="store_true")
     parser.add_argument("--invert-watermark", action="store_true")
-    parser.add_argument("--attack-preset", default="lite", choices=["none", "lite", "full", "stress", "script", "requested", "grid"], help="Attack preset for normal benchmark.")
+    parser.add_argument("--attack-preset", default="lite", choices=["none", "lite", "full", "reviewer_stress", "stress", "script", "requested", "grid"], help="Attack preset for normal benchmark.")
     parser.add_argument("--baseline-mode", default="adapt", choices=["adapt", "original", "original-rerun"], help="Global baseline mode: adapt runs local adapted benchmark; original writes paper-reported tables; original-rerun attempts a stricter local rerun.")
     parser.add_argument("--kumar-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"])
     parser.add_argument("--guo-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"])
@@ -2129,7 +2152,7 @@ def main():
     parser.add_argument("--guo-param-mode", default="auto", choices=["auto", "ignore", "require"], help="auto: use Guo lambda file if present; ignore: fixed/default lambda; require: fail if missing.")
     parser.add_argument("--guo-optimizer-fireflies", type=int, default=10)
     parser.add_argument("--guo-optimizer-generations", type=int, default=10)
-    parser.add_argument("--guo-optimizer-attack-preset", default="full", choices=["none", "lite", "full", "stress", "script", "requested", "grid"], help="Attack preset used while optimizing Guo lambda.")
+    parser.add_argument("--guo-optimizer-attack-preset", default="full", choices=["none", "lite", "full", "reviewer_stress", "stress", "script", "requested", "grid"], help="Attack preset used while optimizing Guo lambda.")
     parser.add_argument("--guo-optimizer-alpha", type=float, default=0.01, help="FA randomization alpha, paper default 0.01.")
     parser.add_argument("--guo-optimizer-beta0", type=float, default=1.0, help="FA beta0, paper default 1.")
     parser.add_argument("--guo-optimizer-gamma", type=float, default=1.0, help="FA gamma, paper default 1.")
@@ -2155,7 +2178,7 @@ def main():
     parser.add_argument("--proposal-optimizer-trials", type=int, default=4, help="Legacy alias for --proposal-optimizer-fireflies.")
     parser.add_argument("--proposal-optimizer-fireflies", type=int, default=None)
     parser.add_argument("--proposal-optimizer-generations", type=int, default=2)
-    parser.add_argument("--proposal-optimizer-attack-preset", default="lite", choices=["none", "lite", "full", "stress", "script", "requested", "grid"], help="Attack preset used while optimizing parameters.")
+    parser.add_argument("--proposal-optimizer-attack-preset", default="lite", choices=["none", "lite", "full", "reviewer_stress", "stress", "script", "requested", "grid"], help="Attack preset used while optimizing parameters.")
     parser.add_argument("--proposal-optimizer-alpha", type=float, default=0.18)
     parser.add_argument("--proposal-optimizer-beta0", type=float, default=1.0)
     parser.add_argument("--proposal-optimizer-gamma", type=float, default=1.0)

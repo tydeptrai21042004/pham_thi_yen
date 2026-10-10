@@ -319,14 +319,22 @@ def _source_bgr_to_rgb(img_bgr: np.ndarray) -> np.ndarray:
     return _ensure_uint8_rgb_basic(img_bgr)[:, :, ::-1].copy()
 
 
-def _host_bgr_to_embed_space(img_bgr: np.ndarray) -> np.ndarray:
-    img_bgr = _ensure_uint8_rgb_basic(img_bgr)  # shape/type guard only
-    return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2YCrCb).astype(np.uint8)
+def _host_bgr_to_embed_space(img_bgr: np.ndarray, color_space: str = "YCrCb") -> np.ndarray:
+    img_bgr = _ensure_uint8_rgb_basic(img_bgr)
+    if color_space.upper() == "RGB":
+        return img_bgr[:, :, ::-1].copy()
+    if color_space.upper() == "YCRCB":
+        return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2YCrCb).astype(np.uint8)
+    raise ValueError(f"Unsupported host embedding color space {color_space}")
 
 
-def _embed_space_to_host_bgr(img_embed: np.ndarray) -> np.ndarray:
+def _embed_space_to_host_bgr(img_embed: np.ndarray, color_space: str = "YCrCb") -> np.ndarray:
     img_embed = _ensure_uint8_rgb_basic(img_embed)
-    return cv2.cvtColor(img_embed, cv2.COLOR_YCrCb2BGR).astype(np.uint8)
+    if color_space.upper() == "RGB":
+        return img_embed[:, :, ::-1].copy()
+    if color_space.upper() == "YCRCB":
+        return cv2.cvtColor(img_embed, cv2.COLOR_YCrCb2BGR).astype(np.uint8)
+    raise ValueError(f"Unsupported host embedding color space {color_space}")
 
 
 # =========================================================
@@ -912,7 +920,7 @@ class ProposalQHDWTHess:
 
     def _prepare_embed_space_from_rgb(self, host_rgb: np.ndarray):
         host_bgr = _rgb_to_source_bgr(host_rgb)
-        host_embed_orig = _host_bgr_to_embed_space(host_bgr)
+        host_embed_orig = _host_bgr_to_embed_space(host_bgr, self.params.host_embed_color_space)
         bands_by_ch: dict[int, dict[str, np.ndarray]] = {}
         H0 = W0 = None
         for ch in self.params.host_channels:
@@ -1027,7 +1035,7 @@ class ProposalQHDWTHess:
             out_channel[:H0, :W0] = np.clip(np.rint(rec_channel), 0, 255)
             watermarked_embed[:, :, int(ch)] = out_channel.astype(np.uint8)
 
-        watermarked_bgr = _embed_space_to_host_bgr(watermarked_embed)
+        watermarked_bgr = _embed_space_to_host_bgr(watermarked_embed, params.host_embed_color_space)
         watermarked_rgb = _source_bgr_to_rgb(watermarked_bgr)
 
         q4_used, hpos_used, skip_used = _flag_stats(flags)
@@ -1288,7 +1296,7 @@ class ProposalQHDWTHess:
         if payload_len <= 0:
             raise ValueError("Invalid payload length in key")
         img_bgr = _rgb_to_source_bgr(possibly_attacked_rgb)
-        embed_img = _host_bgr_to_embed_space(img_bgr)
+        embed_img = _host_bgr_to_embed_space(img_bgr, params.host_embed_color_space)
         _, H0, W0 = _crop_for_dwt(embed_img[:, :, int(params.host_channels[0])], DWT_LEVEL, params.block_size)
         local_params = ProposalParams.from_dict(params.to_dict())
         local_params.dwt_bands = tuple(payload_meta.get("dwt_bands", params.dwt_bands))
