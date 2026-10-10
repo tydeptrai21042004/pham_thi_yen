@@ -2101,11 +2101,15 @@ def run_proposal_size_sweep_phase(
 
 def main():
     parser = argparse.ArgumentParser(description="Run the cleaned watermarking benchmark on 512x512 RGB host images and a 64x64 binary watermark.")
-    parser.add_argument("--phase", default="normal", choices=["normal", "optimize", "optimization", "proposal-plot", "proposal_plot", "plot-proposal", "proposal-ablation", "proposal_ablation", "ablation", "proposal-size-sweep", "proposal_size_sweep", "size-sweep", "proposal-hparam-sweep", "proposal_hparam_sweep", "hparam-sweep"], help="normal: run benchmark; optimize: search/export parameters; proposal-plot: generate NC-vs-attack plots; proposal-ablation: run proposal component ablations; proposal-size-sweep: run the proposal over multiple resized host/watermark sizes; proposal-hparam-sweep: grid sweep Tier-1 proposal hyperparameters q4_tau, q4_margin, h01_q, h01_margin.")
+    parser.add_argument("--phase", default="normal", choices=["normal", "optimize", "optimization", "proposal-plot", "proposal_plot", "plot-proposal", "proposal-ablation", "proposal_ablation", "ablation", "proposal-size-sweep", "proposal_size_sweep", "size-sweep", "proposal-hparam-sweep", "proposal_hparam_sweep", "hparam-sweep", "neural"], help="normal: run benchmark; optimize: search/export parameters; proposal-plot: generate NC-vs-attack plots; proposal-ablation: run proposal component ablations; proposal-size-sweep: run the proposal over multiple resized host/watermark sizes; proposal-hparam-sweep: grid sweep Tier-1 proposal hyperparameters q4_tau, q4_margin, h01_q, h01_margin.")
     parser.add_argument("--host-dir", default="data/host")
     parser.add_argument("--watermark", default="data/watermark/wm.png")
     parser.add_argument("--output", default="results/common_benchmark")
     parser.add_argument("--methods", default="all", help="Comma-separated: all,baselines,kumar2021,guo2017_dwt_qr_fa,gaata2022_dwt_hess_fwa,dwt_hd_svd_2025,hess_nha2023,roy2018_dwt_svd,dwt_wht_svd_2024,qwt_qsvd_zhang2022_blind,qwt_qsvd_zhang2022_semiblind,zhu2021_iwt_svd_adapted,proposal")
+    parser.add_argument("--neural-device", default="auto", choices=["auto", "cpu", "cuda"], help="Neural phase: device for ChunkySeal (TrustMark uses its upstream default).")
+    parser.add_argument("--neural-model-type", default="Q", choices=["B", "C", "P", "Q"], help="Neural phase: TrustMark model variant.")
+    parser.add_argument("--neural-max-attacks", type=int, default=0, help="Neural phase: attack count limit per host (0 = entire preset).")
+    parser.add_argument("--neural-seed", type=int, default=3101, help="Neural phase: deterministic payload seed.")
     parser.add_argument("--max-images", type=int, default=None, help="Optional quick-run limit.")
     parser.add_argument("--no-save-images", action="store_true")
     parser.add_argument("--invert-watermark", action="store_true")
@@ -2182,6 +2186,19 @@ def main():
     parser.add_argument("--hparam-sweep-max-combinations", type=int, default=None, help="Optional debug limit for proposal-hparam-sweep; default runs the full grid.")
 
     args = parser.parse_args()
+    if args.phase == "neural":
+        # Keep ML/DL evaluation distinct: `--methods all` means both pretrained
+        # neural methods only in this phase, not the eleven classical methods.
+        from watermarklab.experiments.neural_baselines import run_dataset
+        run_dataset(
+            methods=args.methods, host_dir=args.host_dir, output=args.output,
+            attack_preset=args.attack_preset, max_images=args.max_images,
+            max_attacks=args.neural_max_attacks, seed=args.neural_seed,
+            device=args.neural_device, model_type=args.neural_model_type,
+            save_images=not args.no_save_images,
+        )
+        print(f"Saved neural comparison table to: {Path(args.output) / 'compare_psnr_nc_ber_ncc_before_after_attack.csv'}")
+        return
     fireflies = int(args.proposal_optimizer_fireflies if args.proposal_optimizer_fireflies is not None else args.proposal_optimizer_trials)
     repeat_value = _parse_repeat(args.proposal_repeat)
     selected = [s.strip() for s in args.methods.split(",") if s.strip()]
