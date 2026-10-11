@@ -52,6 +52,12 @@ HPOS_CANDIDATES: tuple[tuple[str, tuple[int, int]], ...] = (
     ("h22", (1, 1)),
 )
 
+# All new 4x4/8x8/16x16 keys encode absolute H positions in hpos_list.
+# Values 0 and 1 remain reserved for decoding older fixed-position keys.
+# New keys use values >= 2, even if their selected position is h21 or h22.
+H_ENERGY_POSITION_OFFSET = 2
+H_ENERGY_POSITION_STRIDE = 16  # maximal supported block dimension
+
 EPS_CONF = 1e-12
 
 MIN_SURVIVAL_RATE = 0.75
@@ -783,11 +789,66 @@ def _candidate_is_strong_enough(cand: dict, params: ProposalParams) -> bool:
     return True
 
 
+def _rank_hpos_by_energy(block0: np.ndarray) -> tuple[tuple[str, tuple[int, int]], ...]:
+    """Select the top two legal H coefficients by squared energy, at every size.
+
+    Works for 4x4, 8x8 and 16x16.  Ranking is calculated from the original
+    unmodified block (before seeing the watermark bit), over all structurally
+    valid upper-Hessenberg positions.  Energy ties use ascending row/column.
+    The existing BSS/MSE criterion subsequently chooses between these two.
+    """
+    block = np.asarray(block0, dtype=np.float64)
+    n = int(block.shape[0])
+    if block.shape != (n, n) or n not in (4, 8, 16):
+        raise ValueError("H energy ranking requires a square 4, 8 or 16 block")
+    H = hessenberg(block, calc_q=False)
+    candidates = []
+    for rr in range(n):
+        for cc in range(n):
+            if rr > cc + 1:  # below the first subdiagonal is structurally zero
+                continue
+            energy = float(H[rr, cc]) ** 2
+            if not math.isfinite(energy):
+                raise ValueError("nonfinite Hessenberg coefficient energy")
+            candidates.append((-energy, rr, cc))
+    candidates.sort()  # most energy first; then row/column in a tie
+    return tuple((f"h{rr + 1},{cc + 1}", (rr, cc))
+                 for _, rr, cc in candidates[:2])
+
+
+def _encode_hpos(pos: tuple[int, int], block_size: int) -> int:
+    """Encode the absolute H position for every supported block size.
+
+    Codes 0 and 1 are deliberately never emitted; decoding them remains
+    supported for pre-update key compatibility (legacy h21/h22).
+    """
+    rr, cc = (int(pos[0]), int(pos[1]))
+    n = int(block_size)
+    if n not in (4, 8, 16) or not (0 <= rr < n and 0 <= cc < n and rr <= cc + 1):
+        raise ValueError("invalid H energy position")
+    return H_ENERGY_POSITION_OFFSET + H_ENERGY_POSITION_STRIDE * rr + cc
+
+
+def _decode_hpos(index: int, block_size: int) -> tuple[int, int]:
+    """Decode new position values and earlier 0/1-indexed side information."""
+    i, n = int(index), int(block_size)
+    if i in (0, 1):
+        return HPOS_CANDIDATES[i][1]
+    if n not in (4, 8, 16) or i < H_ENERGY_POSITION_OFFSET:
+        raise ValueError("invalid H coefficient index")
+    k = i - H_ENERGY_POSITION_OFFSET
+    rr, cc = divmod(k, H_ENERGY_POSITION_STRIDE)
+    if not (0 <= rr < n and 0 <= cc < n and rr <= cc + 1):
+        raise ValueError("invalid encoded H position for this block size")
+    return rr, cc
+
+
 def _best_hpos_candidate(block0: np.ndarray, bit: int, params: ProposalParams) -> dict:
     all_h: list[dict] = []
     valid_h: list[dict] = []
 
-    for hpos_idx, (hname, pos) in enumerate(HPOS_CANDIDATES):
+    for hname, pos in _rank_hpos_by_energy(block0):
+        hpos_idx = _encode_hpos(pos, block0.shape[0])
         block_h = _build_hpos_candidate(block0, bit, params, pos)
         score_h, mse_h, raw_h, avg_h, worst_h, ok_h = _candidate_attack_score(block0, block_h, FLAG_HPOS, bit, params, pos=pos)
         cand = {
@@ -917,8 +978,8 @@ class ProposalQHDWTHess:
         self.params = params if isinstance(params, ProposalParams) else ProposalParams.from_dict(params)
         if int(self.params.block_size) not in (4, 8, 16):
             raise ValueError("The experimental Q/H block-size extension supports only 4, 8 or 16")
-        # Same h21/h22, q22/q32 and fixed row-pair rotations for all sizes.
-        # This is a controlled size generalization, not a new adaptive method.
+        # All sizes use per-block top-two H coefficient energy selection.
+        # Q statistics and the existing score/rotation logic remain unchanged.
         self.use_optimizer = bool(use_optimizer)
         self.optimizer_trials = int(optimizer_trials)
         self.optimizer_seed = int(optimizer_seed)
@@ -1000,8 +1061,7 @@ class ProposalQHDWTHess:
                     # during embedding can 'recognize' an unmarked original.
                     contrastive = []
                     for cand in cands:
-                        p0 = (HPOS_CANDIDATES[int(cand["hpos_idx"])][1]
-                              if cand["flag"] == FLAG_HPOS else None)
+                        p0 = (cand["pos"] if cand["flag"] == FLAG_HPOS else None)
                         try:
                             old_bit = _extract_bit_from_candidate_block(block0, cand["flag"], params, pos=p0)
                             if old_bit != bit and cand["mse"] > 1e-12:
@@ -1066,7 +1126,7 @@ class ProposalQHDWTHess:
                 "total_flags": int(len(flags)),
                 "parameter_snapshot": _to_json_safe(params.to_dict()),
                 "block_hash": "SHA-256",
-                "h_candidates": [name for name, _ in HPOS_CANDIDATES],
+                "h_candidates": ["rank_1_highest_energy", "rank_2_highest_energy"],
                 "embedding_error_count_sampled": int(len(embedding_errors)),
                 "weighted_voting_removed": True,
                 "confidence_scoring_removed": True,
@@ -1075,6 +1135,11 @@ class ProposalQHDWTHess:
                 "rsa_removed": True,
             }
         )
+
+        wm_meta["h_candidate_policy"] = "per_block_top_two_H_energy"
+        wm_meta["h_energy_definition"] = "squared_H_coefficient_magnitude"
+        wm_meta["h_position_encoding"] = "2 + 16 * row + column (zero based)"
+        wm_meta["h_energy_top2_count"] = 2
 
         key = ProposalKey(
             flags=[int(x) for x in flags],
@@ -1335,9 +1400,8 @@ class ProposalQHDWTHess:
                     bit = _extract_bit_from_candidate_block(block, FLAG_Q4, local_params)
                 elif flag == FLAG_HPOS:
                     hpos_idx = int(key.hpos_list[idx])
-                    if not (0 <= hpos_idx < len(HPOS_CANDIDATES)):
-                        raise ValueError("invalid H coefficient index")
-                    bit = _extract_bit_from_candidate_block(block, FLAG_HPOS, local_params, pos=HPOS_CANDIDATES[hpos_idx][1])
+                    pos = _decode_hpos(hpos_idx, bs)
+                    bit = _extract_bit_from_candidate_block(block, FLAG_HPOS, local_params, pos=pos)
                 else:
                     raise ValueError("unknown mode flag")
                 if bit:
@@ -1386,6 +1450,9 @@ __all__ = [
     "_q4_stat",
     "_build_q4_candidate",
     "_build_hpos_candidate",
+    "_rank_hpos_by_energy",
+    "_encode_hpos",
+    "_decode_hpos",
     "_extract_bit_from_candidate_block",
     "_make_structured_schedule",
     "_shuffle_positions",

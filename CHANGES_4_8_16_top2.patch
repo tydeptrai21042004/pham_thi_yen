@@ -1,0 +1,121 @@
+--- a/src/watermarklab/methods/proposal_qh_dwt_hess.py
++++ b/src/watermarklab/methods/proposal_qh_dwt_hess.py
+@@ -52,9 +52,9 @@
+     ("h22", (1, 1)),
+ )
+ 
+-# Extended block sizes encode an absolute H position in the existing hpos_list.
+-# Values 0 and 1 remain the original 4x4 h21/h22 indices, including when
+-# reading side information produced by the earlier experimental 8/16 version.
++# All new 4x4/8x8/16x16 keys encode absolute H positions in hpos_list.
++# Values 0 and 1 remain reserved for decoding older fixed-position keys.
++# New keys use values >= 2, even if their selected position is h21 or h22.
+ H_ENERGY_POSITION_OFFSET = 2
+ H_ENERGY_POSITION_STRIDE = 16  # maximal supported block dimension
+ 
+@@ -790,19 +790,17 @@
+ 
+ 
+ def _rank_hpos_by_energy(block0: np.ndarray) -> tuple[tuple[str, tuple[int, int]], ...]:
+-    """Select two strongest legal H entries for 8x8/16x16, per original block.
+-
+-    Energy is squared magnitude of a Hessenberg coefficient.  The ranking is
+-    computed before watermark modification, without the watermark bit or attack
+-    results.  Ties are resolved by increasing (row, column) for reproducibility.
+-    The 4x4 path *must* retain the original fixed two candidates verbatim.
++    """Select the top two legal H coefficients by squared energy, at every size.
++
++    Works for 4x4, 8x8 and 16x16.  Ranking is calculated from the original
++    unmodified block (before seeing the watermark bit), over all structurally
++    valid upper-Hessenberg positions.  Energy ties use ascending row/column.
++    The existing BSS/MSE criterion subsequently chooses between these two.
+     """
+     block = np.asarray(block0, dtype=np.float64)
+     n = int(block.shape[0])
+     if block.shape != (n, n) or n not in (4, 8, 16):
+         raise ValueError("H energy ranking requires a square 4, 8 or 16 block")
+-    if n == 4:
+-        return HPOS_CANDIDATES
+     H = hessenberg(block, calc_q=False)
+     candidates = []
+     for rr in range(n):
+@@ -819,15 +817,14 @@
+ 
+ 
+ def _encode_hpos(pos: tuple[int, int], block_size: int) -> int:
+-    """Store absolute position for large blocks; 4x4 key format stays intact."""
++    """Encode the absolute H position for every supported block size.
++
++    Codes 0 and 1 are deliberately never emitted; decoding them remains
++    supported for pre-update key compatibility (legacy h21/h22).
++    """
+     rr, cc = (int(pos[0]), int(pos[1]))
+     n = int(block_size)
+-    if n == 4:
+-        for legacy_idx, (_, legacy_pos) in enumerate(HPOS_CANDIDATES):
+-            if (rr, cc) == legacy_pos:
+-                return legacy_idx
+-        raise ValueError("legacy 4x4 H position must be h21 or h22")
+-    if n not in (8, 16) or not (0 <= rr < n and 0 <= cc < n and rr <= cc + 1):
++    if n not in (4, 8, 16) or not (0 <= rr < n and 0 <= cc < n and rr <= cc + 1):
+         raise ValueError("invalid H energy position")
+     return H_ENERGY_POSITION_OFFSET + H_ENERGY_POSITION_STRIDE * rr + cc
+ 
+@@ -837,7 +834,7 @@
+     i, n = int(index), int(block_size)
+     if i in (0, 1):
+         return HPOS_CANDIDATES[i][1]
+-    if n == 4 or n not in (8, 16) or i < H_ENERGY_POSITION_OFFSET:
++    if n not in (4, 8, 16) or i < H_ENERGY_POSITION_OFFSET:
+         raise ValueError("invalid H coefficient index")
+     k = i - H_ENERGY_POSITION_OFFSET
+     rr, cc = divmod(k, H_ENERGY_POSITION_STRIDE)
+@@ -850,9 +847,8 @@
+     all_h: list[dict] = []
+     valid_h: list[dict] = []
+ 
+-    for legacy_or_rank_idx, (hname, pos) in enumerate(_rank_hpos_by_energy(block0)):
+-        hpos_idx = (legacy_or_rank_idx if block0.shape[0] == 4
+-                    else _encode_hpos(pos, block0.shape[0]))
++    for hname, pos in _rank_hpos_by_energy(block0):
++        hpos_idx = _encode_hpos(pos, block0.shape[0])
+         block_h = _build_hpos_candidate(block0, bit, params, pos)
+         score_h, mse_h, raw_h, avg_h, worst_h, ok_h = _candidate_attack_score(block0, block_h, FLAG_HPOS, bit, params, pos=pos)
+         cand = {
+@@ -982,9 +978,8 @@
+         self.params = params if isinstance(params, ProposalParams) else ProposalParams.from_dict(params)
+         if int(self.params.block_size) not in (4, 8, 16):
+             raise ValueError("The experimental Q/H block-size extension supports only 4, 8 or 16")
+-        # At 4x4, preserve original h21/h22 and full candidate logic exactly.
+-        # At 8x8/16x16, H candidates use per-block top-two coefficient energy;
+-        # Q statistics and the remaining score/rotation logic stay unchanged.
++        # All sizes use per-block top-two H coefficient energy selection.
++        # Q statistics and the existing score/rotation logic remain unchanged.
+         self.use_optimizer = bool(use_optimizer)
+         self.optimizer_trials = int(optimizer_trials)
+         self.optimizer_seed = int(optimizer_seed)
+@@ -1131,7 +1126,7 @@
+                 "total_flags": int(len(flags)),
+                 "parameter_snapshot": _to_json_safe(params.to_dict()),
+                 "block_hash": "SHA-256",
+-                "h_candidates": [name for name, _ in HPOS_CANDIDATES],
++                "h_candidates": ["rank_1_highest_energy", "rank_2_highest_energy"],
+                 "embedding_error_count_sampled": int(len(embedding_errors)),
+                 "weighted_voting_removed": True,
+                 "confidence_scoring_removed": True,
+@@ -1141,11 +1136,10 @@
+             }
+         )
+ 
+-        if bs != 4:
+-            wm_meta["h_candidate_policy"] = "per_block_top_two_H_energy"
+-            wm_meta["h_energy_definition"] = "squared_H_coefficient_magnitude"
+-            wm_meta["h_position_encoding"] = "2 + 16 * row + column (zero based)"
+-            wm_meta["h_energy_top2_count"] = 2
++        wm_meta["h_candidate_policy"] = "per_block_top_two_H_energy"
++        wm_meta["h_energy_definition"] = "squared_H_coefficient_magnitude"
++        wm_meta["h_position_encoding"] = "2 + 16 * row + column (zero based)"
++        wm_meta["h_energy_top2_count"] = 2
+ 
+         key = ProposalKey(
+             flags=[int(x) for x in flags],
