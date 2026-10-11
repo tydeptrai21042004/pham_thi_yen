@@ -297,6 +297,24 @@ def _select_gaata_key_params_for_image(host_path: Path, loaded_payload: dict[str
     return None, "default"
 
 
+def _restore_ablation_overrides(params: ProposalParams, requested: ProposalParams) -> ProposalParams:
+    """Optimization is fitted on the full proposal, not on ablation switches.
+
+    Saved snapshots contain full-model flags. Apply the variant's explicit overrides
+    *after* loading optimized numerical parameters, or every ablation runs as full.
+    This preserves full-model behavior exactly when ablation_name == 'full'.
+    """
+    name = str(requested.ablation_name)
+    if name not in PROPOSAL_ABLATION_VARIANTS:
+        raise ValueError(f"Unknown recorded ablation: {name}")
+    if name == "full":
+        return params
+    merged = params.to_dict()
+    merged.update(PROPOSAL_ABLATION_VARIANTS[name]["params"])
+    merged["ablation_name"] = name
+    return ProposalParams.from_dict(merged)
+
+
 def _select_proposal_params_for_image(host_path: Path, base_params: ProposalParams, loaded_payload: dict[str, Any] | None):
     if not loaded_payload or not loaded_payload.get("loaded"):
         return ProposalParams.from_dict(base_params.to_dict()), "default"
@@ -305,11 +323,11 @@ def _select_proposal_params_for_image(host_path: Path, base_params: ProposalPara
         if key in per_image:
             merged = base_params.to_dict()
             merged.update(per_image[key])
-            return ProposalParams.from_dict(merged), f"optimized:{loaded_payload.get('path')}:{key}"
+            return _restore_ablation_overrides(ProposalParams.from_dict(merged), base_params), f"optimized:{loaded_payload.get('path')}:{key}"
     if loaded_payload.get("global_params"):
         merged = base_params.to_dict()
         merged.update(loaded_payload["global_params"])
-        return ProposalParams.from_dict(merged), f"optimized:{loaded_payload.get('path')}:global"
+        return _restore_ablation_overrides(ProposalParams.from_dict(merged), base_params), f"optimized:{loaded_payload.get('path')}:global"
     return ProposalParams.from_dict(base_params.to_dict()), "default"
 
 
@@ -402,7 +420,7 @@ def run_benchmark(
                 extracted_clean = method.extract(watermarked, key, host_rgb=host)
                 extract_clean_time = time.perf_counter() - t1
 
-                key_info = {"proposal_param_source": param_source} if method_id == "proposal" else {}
+                key_info = {"proposal_param_source": param_source, "proposal_block_size": int(key.params.block_size), "proposal_effective_configuration": json.dumps(key.params.to_dict(), sort_keys=True, default=_json_default)} if method_id == "proposal" else {}
                 if method_id == "gaata2022_dwt_hess_fwa" and isinstance(method, Gaata2022DWTHessFWA):
                     key_info["gaata_param_source"] = gaata_param_source
                     key_info["gaata_decimal_position"] = int(method.config.decimal_position)
@@ -1184,6 +1202,11 @@ def run_proposal_ablation_phase(
                 .reset_index()
             )
             attack_summary_df.to_csv(output_dir / "proposal_ablation_summary_by_variant_attack.csv", index=False)
+            attack_group_lookup = {a.name: str(a.group) for a in default_attack_suite(include_none=False,preset=attack_preset)}
+            after_df["attack_group"] = after_df["attack"].map(attack_group_lookup).fillna("unknown")
+            attack_group_df = (after_df.groupby(["proposal_ablation","attack_group"],dropna=False)
+                              .agg(**agg_kwargs).reset_index())
+            attack_group_df.to_csv(output_dir / "proposal_ablation_summary_by_variant_attack_group.csv",index=False)
 
         full_rows = summary_df[summary_df["proposal_ablation"] == "full"]
         deltas: list[dict[str, Any]] = []
@@ -2129,7 +2152,7 @@ def main():
     parser.add_argument("--watermark", default="data/watermark/wm.png")
     parser.add_argument("--output", default="results/common_benchmark")
     parser.add_argument("--methods", default="all", help="Comma-separated: all,baselines,kumar2021,guo2017_dwt_qr_fa,gaata2022_dwt_hess_fwa,dwt_hd_svd_2025,hess_nha2023,roy2018_dwt_svd,dwt_wht_svd_2024,qwt_qsvd_zhang2022_blind,qwt_qsvd_zhang2022_semiblind,zhu2021_iwt_svd_adapted,proposal")
-    parser.add_argument("--neural-device", default="auto", choices=["auto", "cpu", "cuda"], help="Neural phase: device for ChunkySeal (TrustMark uses its upstream default).")
+    parser.add_argument("--neural-device", default="auto", choices=["auto", "cpu", "cuda"], help="Neural phase: device for WAM (TrustMark uses its upstream default).")
     parser.add_argument("--neural-model-type", default="Q", choices=["B", "C", "P", "Q"], help="Neural phase: TrustMark model variant.")
     parser.add_argument("--neural-max-attacks", type=int, default=0, help="Neural phase: attack count limit per host (0 = entire preset).")
     parser.add_argument("--neural-seed", type=int, default=3101, help="Neural phase: deterministic payload seed.")

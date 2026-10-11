@@ -1,5 +1,5 @@
 # Copy the WHOLE script into ONE Kaggle Python cell.
-# Notebook Settings -> Internet ON; GPU recommended for ChunkySeal.
+# Notebook Settings -> Internet ON; GPU recommended for WAM.
 # IMPORTANT: FIRST commit/push the neural patch files to the GitHub repository.
 # This script clones your own updated code, installs optional pretrained models,
 # runs held-out hosts, and keeps ZIP checkpoints; no uploaded source ZIP needed.
@@ -13,7 +13,7 @@ OUT = BASE / 'pham_yen_neural_results'
 OUT.mkdir(parents=True, exist_ok=True)
 ZIP_PATH = BASE / 'pham_yen_neural_results.zip'
 HOST_SEED = 3101
-METHODS_TO_RUN = ('trustmark', 'chunkyseal')  # choose ('trustmark',) if required
+METHODS_TO_RUN = ('trustmark', 'wam')  # native payload capacities differ
 ATTACK_PRESET = 'full'
 MAX_ATTACKS = 0  # 0 = all; choose 2 for fast smoke testing
 SAFE_STOP_SECONDS = int(10.25 * 3600)
@@ -75,17 +75,15 @@ try:
     if help_result.returncode or 'neural-max-attacks' not in help_result.stdout:
         raise RuntimeError('This GitHub checkout lacks the patch. Commit/push the attached patch files before cloning.')
 
-    # Reproduce the same 3/10 host split from the original Kaggle notebook.
-    images = sorted(p for p in (REPO/'data/host').iterdir() if p.suffix.lower() in {'.bmp','.png','.jpg','.jpeg','.webp','.tif','.tiff'})
-    rng=random.Random(HOST_SEED)
-    rng.shuffle(images)
-    train_n=max(2,round(0.25*len(images)))
-    train, test = images[:train_n], images[train_n:]
-    test_dir=OUT/'splits'/'test'
-    test_dir.mkdir(parents=True, exist_ok=True)
-    for item in test: shutil.copy2(item, test_dir/item.name)
-    (OUT/'host_split.json').write_text(json.dumps({'seed':HOST_SEED, 'train':[p.name for p in train],
-                                              'heldout':[p.name for p in test]}, indent=2))
+    # Exact manuscript 12 host (excluding Lenna), 3 tuning / 9 held-out split.
+    from pathlib import Path as _P
+    split_script = [sys.executable,'-m','watermarklab.experiments.splits',
+                   '--host-dir',REPO/'data/host','--output',OUT/'host_split.json','--create-dirs']
+    if not run('split_3_9',split_script,cwd=REPO,timeout_seconds=240):
+        raise RuntimeError('Frozen held-out split failed')
+    split=json.loads((OUT/'host_split.json').read_text())
+    test_dir=Path(split['test_dir'])
+    test=[Path(x) for x in split['test']]
     print('Held-out:', [p.name for p in test])
     save_zip('host split prepared')
 
@@ -94,17 +92,28 @@ try:
                           '--host-dir',test_dir,'--attack-preset',ATTACK_PRESET,
                           '--neural-max-attacks',str(MAX_ATTACKS),'--no-save-images',
                           '--output',OUT/'heldout_trustmark'], cwd=REPO, timeout_seconds=14400)
-    if 'chunkyseal' in METHODS_TO_RUN:
-        # The upstream VideoSeal package currently depends on extra libraries, including decord.
-        ok=run('install_videoseal', [sys.executable,'-m','pip','install','-q',
-                                    'git+https://github.com/facebookresearch/videoseal.git'], timeout_seconds=1800)
-        if ok:
-            run('chunkyseal', [sys.executable,'main.py','--phase','neural','--methods','chunkyseal',
-                               '--host-dir',test_dir,'--attack-preset',ATTACK_PRESET,
-                               '--neural-max-attacks',str(MAX_ATTACKS),'--neural-device','auto',
-                               '--no-save-images','--output',OUT/'heldout_chunkyseal'],
-                cwd=REPO, timeout_seconds=14400)
-    print('Neural benchmark outputs saved separately; DO NOT merge with the 4096-bit matched classical table.')
+    if 'wam' in METHODS_TO_RUN:
+        wam_source=BASE/'watermark-anything'
+        if not wam_source.is_dir():
+            if not run('wam_checkout',['git','clone','--depth','1',
+                'https://github.com/facebookresearch/watermark-anything.git',wam_source],timeout_seconds=1200):
+                raise RuntimeError('Could not clone the official WAM repository')
+        if not run('wam_deps',[sys.executable,'-m','pip','install','-q','-r',wam_source/'requirements.txt'],timeout_seconds=1800):
+            raise RuntimeError('Official WAM dependencies failed to install')
+        weights=wam_source/'checkpoints'/'wam_mit.pth'
+        if not weights.is_file():
+            if not run('wam_mit_checkpoint',[sys.executable,'-c',
+                'import urllib.request,sys;urllib.request.urlretrieve(sys.argv[1],sys.argv[2])',
+                'https://dl.fbaipublicfiles.com/watermark_anything/wam_mit.pth',weights],timeout_seconds=1800):
+                raise RuntimeError('Official WAM pretrained weights missing')
+        ENV['WAM_REPO_DIR']=str(wam_source)
+        ENV['WAM_CHECKPOINT']=str(weights)
+        run('wam',[sys.executable,'main.py','--phase','neural','--methods','wam',
+                   '--host-dir',test_dir,'--attack-preset',ATTACK_PRESET,
+                   '--neural-max-attacks',str(MAX_ATTACKS),'--neural-device','auto',
+                   '--no-save-images','--output',OUT/'heldout_wam'],
+            cwd=REPO,timeout_seconds=14400)
+    print('Neural benchmark outputs saved separately; DO NOT merge with the 1024-bit embedded LL payload or nominal 4096-pixel watermark comparison table.')
 finally:
     save_zip('FINAL')
     print('ARCHIVE:',ZIP_PATH)

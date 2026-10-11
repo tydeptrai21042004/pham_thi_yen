@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 import numpy as np
 from scipy.stats import spearmanr
+from watermarklab.experiments.block_size_comparison import frozen_params
+from watermarklab.experiments.attack_selection import stratified_attack_subset
 from watermarklab.common.attack import default_attack_suite, apply_attack
 from watermarklab.experiments.review_audit import load_binary,load_rgb
 from watermarklab.methods.proposal_qh_dwt_hess import (
@@ -20,14 +22,14 @@ from watermarklab.methods.proposal_qh_dwt_hess import (
 )
 
 
-def run(host:Path,watermark:Path,output:Path,*,host_size=128,watermark_size=16,repeat=1,max_attacks=3):
-    params=ProposalParams.from_dict({"repeat":repeat})
+def run(host:Path,watermark:Path,output:Path,*,host_size=128,watermark_size=16,repeat=None,max_attacks=3,param_file=None):
+    params=frozen_params(param_file, repeat=repeat)
     original=load_rgb(host,host_size)
     wm=load_binary(watermark,watermark_size)
     truth=prepare_binary_watermark_payload_from_array(wm,params)[1]
     method=ProposalQHDWTHess(params=params,use_optimizer=False)
     marked,key=method.embed(original,wm)
-    attacks=default_attack_suite(include_none=False,preset="reviewer_stress")[:max_attacks]
+    attacks=stratified_attack_subset(default_attack_suite(include_none=False,preset="reviewer_stress"),max_attacks)
     rows=[]
     for attack in attacks:
         try:
@@ -67,18 +69,52 @@ def run(host:Path,watermark:Path,output:Path,*,host_size=128,watermark_size=16,r
         if len(set(ranks))>1 and len(set(survival))>1:
             corr,_p=spearmanr(ranks,survival)
             if np.isfinite(corr):correlation=float(corr)
-        summary.append({"attack":attack.name,"samples":len(vals),"survival_rate":float(np.mean(survival)) if vals else None,
-                        "spearman_rho":correlation})
+        mse_corr=None
+        mse_vals=[-float(x["mse"]) for x in vals]
+        if len(set(mse_vals))>1 and len(set(survival))>1:
+            coeff,_p=spearmanr(mse_vals,survival)
+            if np.isfinite(coeff): mse_corr=float(coeff)
+        summary.append({"host":host.name,"attack":attack.name,"attack_group":attack.group,
+                        "samples":len(vals),"survival_rate":float(np.mean(survival)) if vals else None,
+                        "spearman_rho_bss":correlation,"spearman_rho_neg_mse":mse_corr})
     (output/"bss_summary.json").write_text(json.dumps(summary,indent=2),encoding="utf-8")
     return summary
 
 if __name__=="__main__":
     ap=argparse.ArgumentParser(description=__doc__)
-    for arg in ("host","watermark","output"):
+    for arg in ("watermark","output"):
         ap.add_argument("--"+arg,type=Path,required=True)
+    ap.add_argument("--host",type=Path)
+    ap.add_argument("--host-dir",type=Path)
+    ap.add_argument("--max-hosts",type=int,default=9)
+    ap.add_argument("--param-file",type=Path)
     ap.add_argument("--host-size",type=int,default=128)
     ap.add_argument("--watermark-size",type=int,default=16)
-    ap.add_argument("--repeat",type=int,default=1)
+    ap.add_argument("--repeat",type=int,default=None)
     ap.add_argument("--max-attacks",type=int,default=3)
     a=ap.parse_args()
-    print(json.dumps(run(a.host,a.watermark,a.output,host_size=a.host_size,watermark_size=a.watermark_size,repeat=a.repeat,max_attacks=a.max_attacks),indent=2))
+    if not a.host and not a.host_dir: ap.error("Provide --host or --host-dir")
+    hosts=([a.host] if a.host else sorted(p for p in a.host_dir.iterdir() if p.suffix.lower() in ('.bmp','.png','.jpg'))[:a.max_hosts])
+    a.output.mkdir(parents=True,exist_ok=True)
+    combined=[]
+    for host in hosts:
+        result=run(host,a.watermark,a.output/host.stem,host_size=a.host_size,
+                   watermark_size=a.watermark_size,repeat=a.repeat,max_attacks=a.max_attacks,
+                   param_file=a.param_file)
+        combined.extend(result)
+    (a.output/'host_level_summary.json').write_text(json.dumps(combined,indent=2))
+    if combined:
+        import pandas as pd
+        df=pd.DataFrame(combined)
+        # Attack-level and category-level summaries retain undefined correlations
+        # rather than replacing them with apparently successful zeroes.
+        df.to_csv(a.output/'bss_per_host_attack.csv',index=False)
+        df.groupby('attack_group',dropna=False).agg(
+            mean_bss_rho=('spearman_rho_bss','mean'),
+            mean_negative_mse_rho=('spearman_rho_neg_mse','mean'),
+            host_attack_measurements=('attack','count'),
+            total_samples=('samples','sum')).reset_index().to_csv(a.output/'bss_by_attack_group.csv',index=False)
+    (a.output/'manifest.json').write_text(json.dumps({'hosts':[p.name for p in hosts],
+          'n_hosts':len(hosts),'rows':len(combined),
+          'interpretation':'correlations are empirical, not mathematical proof of global robustness'},indent=2))
+    print(json.dumps({'hosts':len(hosts),'summary_records':len(combined)},indent=2))

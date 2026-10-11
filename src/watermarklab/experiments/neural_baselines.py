@@ -1,10 +1,10 @@
 """Optional *pretrained* neural watermark comparisons on the project's host images.
 
-TrustMark:    pip install trustmark
-ChunkySeal:   install facebookresearch/videoseal and a compatible torch build.
+TrustMark: pip install trustmark
+WAM: official facebookresearch/watermark-anything checkout + MIT checkpoint.
 
 These are native-capacity benchmarks (TrustMark BCH_5: typically 61 information
-bits; ChunkySeal: 1024 information bits), NOT 4096-bit matched comparisons.
+bits; WAM: 32 information bits), NOT 4096-bit matched comparisons.
 No neural model is retrained on the test images.
 """
 from __future__ import annotations
@@ -26,13 +26,13 @@ from watermarklab.common.metrics import psnr, ssim
 from watermarklab.experiments.review_audit import load_rgb
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
-METHODS = ("trustmark", "chunkyseal")
+METHODS = ("trustmark", "wam")
 COLUMNS = [
     "method_id", "method_name", "image", "attack", "phase",
     "psnr", "ssim", "nc", "ncc", "ber", "embed_time_sec",
     "extract_time_sec", "native_capacity_bits", "payload_kind",
     "decoded", "detected", "ber_if_missing_one", "model_device",
-    "attack_applied", "error",
+    "attack_applied", "error", "predicted_mask_fraction",
 ]
 
 
@@ -67,74 +67,75 @@ class TrustMarkAdapter:
         return np.fromiter((int(char) for char in decoded), dtype=np.uint8), True
 
 
-class ChunkySealAdapter:
-    """Official VideoSeal model zoo's 1024-bit pretrained ChunkySeal model."""
-    name = "ChunkySeal"
+class WAMAdapter:
+    """WAM 2025 official pretrained 32-bit image watermark (full-image mask).
+
+    Requires upstream git checkout and MIT weights; no substitute model is used.
+    The detector's segmentation mask is *not* a calibrated ownership decision.
+    """
+    name = "WAM"
+    capacity = 32
 
     def __init__(self, model_type: str = "Q", device: str = "auto"):
+        import os
+        import sys
         try:
             import torch
-            import videoseal
+            import torch.nn.functional as F
         except ImportError as exc:
-            raise RuntimeError(
-                "ChunkySeal requires torch and facebookresearch/videoseal; see docs/NEURAL_BASELINES.md"
-            ) from exc
-        self.torch = torch
+            raise RuntimeError("WAM requires a compatible PyTorch installation") from exc
+        self.torch, self.F = torch, F
         self.device = ("cuda" if torch.cuda.is_available() else "cpu") if device == "auto" else device
         if self.device == "cuda" and not torch.cuda.is_available():
-            raise RuntimeError("CUDA requested for ChunkySeal but CUDA is unavailable")
-        # Upstream model cards point to configs/attenuation.yaml. Some pip builds
-        # omit this *data* file despite downloading the model checkpoint.
-        # Recover ONLY from an official source checkout, never invent a YAML.
-        package_dir = Path(videoseal.__file__).resolve().parent
-        required = package_dir / "configs" / "attenuation.yaml"
-        if not required.is_file():
-            candidates = [
-                package_dir.parent / "configs" / "attenuation.yaml",
-                Path.cwd() / "configs" / "attenuation.yaml",
-                Path.cwd() / "videoseal-src" / "configs" / "attenuation.yaml",
-                Path('/kaggle/working/videoseal-src/configs/attenuation.yaml'),
-            ]
-            available = next((p for p in candidates if p.is_file()), None)
-            if available is None:
-                raise RuntimeError(
-                    "VideoSeal's official configs/attenuation.yaml is missing. "
-                    "Clone facebookresearch/videoseal into /kaggle/working/videoseal-src "
-                    "and install it in editable mode before loading ChunkySeal."
-                )
-            required.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(available, required)
-        self.model = videoseal.load("chunkyseal").eval().to(self.device)
-        self.capacity = 1024
+            raise RuntimeError("WAM CUDA requested but not available")
+        repo = Path(os.environ.get("WAM_REPO_DIR", "/kaggle/working/watermark-anything")).resolve()
+        config = repo / "checkpoints" / "params.json"
+        weights = Path(os.environ.get("WAM_CHECKPOINT", str(repo / "checkpoints" / "wam_mit.pth")))
+        if not config.is_file() or not weights.is_file():
+            raise FileNotFoundError(f"Official WAM checkout/config and MIT pretrained weights required: {config} / {weights}")
+        if str(repo) not in sys.path:
+            sys.path.insert(0, str(repo))
+        # Upstream config references 'configs/...' relative to its repository.
+        # Use a temporary cwd change only during the upstream loader call.
+        from notebooks.inference_utils import (load_model_from_checkpoint, default_transform, unnormalize_img)
+        from watermark_anything.data.metrics import msg_predict_inference
+        import contextlib
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(repo)
+            with torch.no_grad():
+                self.model = load_model_from_checkpoint(str(config), str(weights)).to(self.device).eval()
+        finally:
+            os.chdir(original_cwd)
+        self.transform, self.unnormalize, self.msg_predict = default_transform, unnormalize_img, msg_predict_inference
+        self.model_source = "facebookresearch/watermark-anything MIT pretrained wam_mit.pth"
+        self.mask_fraction = None
 
     def _tensor(self, rgb: np.ndarray):
-        return (self.torch.from_numpy(np.ascontiguousarray(rgb))
-                .permute(2, 0, 1).unsqueeze(0).float().to(self.device) / 255.0)
+        return self.transform(Image.fromarray(rgb)).unsqueeze(0).to(self.device)
 
     def embed(self, rgb: np.ndarray, bits: np.ndarray) -> np.ndarray:
+        bits = np.asarray(bits, dtype=np.uint8).reshape(-1)
         if bits.size != self.capacity:
-            raise ValueError(f"ChunkySeal requires {self.capacity} bits")
-        with self.torch.no_grad():
-            msg = self.torch.from_numpy(bits.reshape(1, -1).astype(np.float32)).to(self.device)
-            result = self.model.embed(self._tensor(rgb), msgs=msg, is_video=False)
-        marked = result["imgs_w"]
-        if marked.ndim != 4 or marked.shape[0] != 1:
-            raise RuntimeError(f"Unexpected ChunkySeal image output shape: {tuple(marked.shape)}")
-        marked = marked[0].detach().cpu().clamp(0, 1)
-        return (marked.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
+            raise ValueError("WAM requires 32 bits")
+        with self.torch.inference_mode():
+            message = self.torch.tensor(bits, dtype=self.torch.float32, device=self.device)
+            # Official WAM uses the whole image when no localization mask is applied.
+            output = self.model.embed(self._tensor(rgb), message)
+            marked = self.unnormalize(output["imgs_w"]).clamp(0, 1)[0]
+        return (marked.permute(1, 2, 0).detach().cpu().numpy() * 255.0).round().astype(np.uint8)
 
-    def detect(self, rgb: np.ndarray) -> tuple[np.ndarray, None]:
-        with self.torch.no_grad():
-            result = self.model.detect(self._tensor(rgb), is_video=False)
-        predictions = result["preds"].detach().cpu().float()
-        # Expected [batch, capacity + 1] or [batch, capacity + 1, H, W].
-        if predictions.shape[0] != 1 or predictions.shape[1] != self.capacity + 1:
-            raise RuntimeError(f"Unexpected ChunkySeal prediction shape: {tuple(predictions.shape)}")
-        if predictions.ndim > 2:
-            predictions = predictions.mean(dim=tuple(range(2, predictions.ndim)))
-        bits = (predictions[0, 1:] > 0).numpy().astype(np.uint8)
-        # Do NOT invent a calibrated presence threshold from the first logit.
-        return bits, None
+    def detect(self, rgb: np.ndarray) -> tuple[np.ndarray | None, bool]:
+        with self.torch.inference_mode():
+            logits = self.model.detect(self._tensor(rgb))["preds"]
+            if logits.shape[0] != 1 or logits.shape[1] != self.capacity + 1:
+                raise ValueError(f"Unexpected WAM tensor shape: {tuple(logits.shape)}")
+            mask = logits[:, 0].sigmoid()
+            self.mask_fraction = float((mask > 0.5).float().mean().item())
+            if self.mask_fraction == 0.0:
+                return None, False
+            bits = self.msg_predict(logits[:, 1:], mask).reshape(-1)
+            return bits.to(self.torch.uint8).cpu().numpy(), True
 
 
 def _nc_ncc(reference: np.ndarray, estimated: np.ndarray) -> tuple[float, float]:
@@ -161,8 +162,8 @@ def _csv(path: Path, rows: list[dict], columns: list[str]) -> None:
 def _create_adapter(name: str, model_type: str = "Q", device: str = "auto"):
     if name == "trustmark":
         return TrustMarkAdapter(model_type=model_type, device=device)
-    if name == "chunkyseal":
-        return ChunkySealAdapter(device=device)
+    if name == "wam":
+        return WAMAdapter(device=device)
     raise ValueError(f"Unknown neural model: {name}")
 
 
@@ -171,7 +172,7 @@ def _select_methods(methods: str) -> list[str]:
     if selected in (["all"], ["neural"], ["neural-all"]):
         return list(METHODS)
     if not selected or any(v not in METHODS for v in selected):
-        raise ValueError("Neural phase --methods must be: trustmark,chunkyseal,all")
+        raise ValueError("Neural phase --methods must be: trustmark,wam,all")
     return list(dict.fromkeys(selected))
 
 
@@ -214,7 +215,8 @@ def _measurement(adapter, source: np.ndarray, watermarked: np.ndarray, image: np
                     extract_time_sec=extract_seconds, native_capacity_bits=adapter.capacity,
                     payload_kind="native_random_information_bits", decoded=bool(valid_payload),
                     detected=present, ber_if_missing_one=(raw_ber if raw_ber is not None else (1.0 if phase != "control" else None)),
-                    model_device=adapter.device, attack_applied=attack_applied, error="")
+                    model_device=adapter.device, attack_applied=attack_applied, error="",
+                    predicted_mask_fraction=getattr(adapter,"mask_fraction", None))
     except Exception as exc:
         return dict(method_id=adapter.name.lower(), method_name=adapter.name, image=image_name,
                     attack=attack, phase=phase, psnr=psnr(source, image), ssim=ssim(source, image),
@@ -222,7 +224,8 @@ def _measurement(adapter, source: np.ndarray, watermarked: np.ndarray, image: np
                     extract_time_sec=time.perf_counter() - start, native_capacity_bits=adapter.capacity,
                     payload_kind="native_random_information_bits", decoded=False,
                     detected=None, ber_if_missing_one=(1.0 if phase != "control" else None),
-                    model_device=adapter.device, attack_applied=attack_applied, error=repr(exc))
+                    model_device=adapter.device, attack_applied=attack_applied, error=repr(exc),
+                    predicted_mask_fraction=getattr(adapter,"mask_fraction", None))
 
 
 def _write_results(output: Path, rows: list[dict], failures: list[dict], manifest: dict) -> None:
@@ -338,12 +341,14 @@ def run_dataset(*, methods: str, host_dir: str | Path, output: str | Path,
                                  "traceback": traceback.format_exc()})
                 print(f"[NEURAL ERROR] {name} {path.name}: {exc}", flush=True)
             _write_results(output, rows, failures, manifest)  # supports Kaggle partial collection
-        if successful_hosts:
+        if successful_hosts == len(hosts):
             success_methods.add(name)
-    manifest["status"] = "complete" if len(success_methods) == len(selected) and not failures else "partial_or_failed"
+    expected_rows = len(selected) * len(hosts) * (len(cases) + 2)
+    manifest["expected_rows"] = expected_rows
+    manifest["status"] = "complete" if (len(success_methods) == len(selected) and not failures and len(rows)==expected_rows) else "partial_or_failed"
     manifest["methods_completed"] = sorted(success_methods)
     _write_results(output, rows, failures, manifest)
-    if len(success_methods) != len(selected) or failures:
+    if manifest["status"] != "complete":
         raise RuntimeError(f"Neural benchmark incomplete: {len(success_methods)}/{len(selected)} methods ran; {len(failures)} errors. Inspect {output/'failures.json'}")
     return rows
 

@@ -567,8 +567,11 @@ def _q4_stat(Qm: np.ndarray) -> float:
     return float(Qm[1, 1] ** 2 + Qm[2, 1] ** 2)
 
 
-def _givens4(a: int, b: int, theta: float) -> np.ndarray:
-    G = np.eye(4, dtype=np.float64)
+def _givens4(a: int, b: int, theta: float, size: int = 4) -> np.ndarray:
+    """Size-generalized Givens rotation; the 4x4 branch is unchanged."""
+    if size not in (4, 8, 16):
+        raise ValueError("Only tested experimental block sizes 4, 8, 16 are supported")
+    G = np.eye(size, dtype=np.float64)
     c = math.cos(float(theta))
     s = math.sin(float(theta))
     G[a, a] = c
@@ -640,7 +643,7 @@ def _build_q4_candidate(block: np.ndarray, bit: int, params: ProposalParams) -> 
             for th in theta_grid:
                 if abs(float(th)) < 1e-15:
                     continue
-                G = _givens4(a, b, float(th))
+                G = _givens4(a, b, float(th), size=block.shape[0])
                 Qtrial = G @ best_Q
                 loss, mse, signed_margin = _q4_givens_loss(block, Hh, Qtrial, bit, params)
                 key = (loss, mse, -signed_margin)
@@ -912,8 +915,10 @@ class ProposalQHDWTHess:
         optimizer_seed: int = 123,
     ):
         self.params = params if isinstance(params, ProposalParams) else ProposalParams.from_dict(params)
-        if int(self.params.block_size) != 4:
-            raise NotImplementedError("Q/H coefficient selectors and Givens search are 4x4-specific; a block-size study needs a separately validated generalized encoder")
+        if int(self.params.block_size) not in (4, 8, 16):
+            raise ValueError("The experimental Q/H block-size extension supports only 4, 8 or 16")
+        # Same h21/h22, q22/q32 and fixed row-pair rotations for all sizes.
+        # This is a controlled size generalization, not a new adaptive method.
         self.use_optimizer = bool(use_optimizer)
         self.optimizer_trials = int(optimizer_trials)
         self.optimizer_seed = int(optimizer_seed)

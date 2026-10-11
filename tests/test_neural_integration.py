@@ -87,7 +87,7 @@ def test_missing_model_fails_nonzero_and_writes_manifest(tmp_path):
 
 
 def test_neural_selector_does_not_change_classical_default():
-    assert _select_methods("all") == ["trustmark", "chunkyseal"]
+    assert _select_methods("all") == ["trustmark", "wam"]
     assert _select_methods("trustmark") == ["trustmark"]
     with pytest.raises(ValueError):
         _select_methods("proposal")

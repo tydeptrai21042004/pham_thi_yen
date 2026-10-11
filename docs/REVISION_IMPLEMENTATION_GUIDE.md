@@ -17,7 +17,7 @@ This is a **change-only patch** for `pham_thi_yen-main`. It preserves the origin
 | Independent split | Deterministic image-level train/test split and input hashes | R1.3 | Tested, not yet wired to FA trainer |
 | Presence audit | Original-host and different-host negative controls; payload BER, watermark BER/NC, color-conversion-only PSNR, timings, side info | AE, R1.1–R1.4 | Smoke tested |
 | BSS validation | Local BSS vs per-block actual attack survival with Spearman correlation | R1.6, R2.4 | Smoke tested |
-| Optional neural | Native-payload adapters for TrustMark and ChunkySeal; checkpoints downloaded by upstream libs | R2.2 | API wired; **inference not tested locally** |
+| Optional neural | Native-payload adapters for TrustMark and WAM; upstream official checkpoints are required | R2.2 | API wired; **inference not tested locally** |
 
 ## Installation
 
@@ -74,12 +74,16 @@ python -m watermarklab.experiments.neural_baselines \
   --output results/neural_trustmark --max-attacks 3
 ```
 
-ChunkySeal requires a separate installation of the official `facebookresearch/videoseal` repository and PyTorch. Once installed:
+WAM (ICLR 2025) requires the official `facebookresearch/watermark-anything`
+checkout, its dependencies and the MIT-pretrained `wam_mit.pth` checkpoint.
+See `docs/NEURAL_BASELINES.md` for exact setup. Example:
 
 ```bash
+export WAM_REPO_DIR=/path/to/watermark-anything
+export WAM_CHECKPOINT=/path/to/watermark-anything/checkpoints/wam_mit.pth
 python -m watermarklab.experiments.neural_baselines \
-  --method chunkyseal --host data/host/Girl.bmp \
-  --output results/neural_chunkyseal --max-attacks 3
+  --method wam --host data/host/Girl.bmp \
+  --output results/neural_wam --max-attacks 3
 ```
 
 These adapters require upstream checkpoints and internet on first use. They **were not executed** in the provided offline environment; update the adapter if the upstream API differs. Never label their native-message results as equivalent to the proposed 1024- or 4096-bit payload without a payload-matched protocol.

@@ -118,11 +118,21 @@ def run_all(out:Path, *, run_neural:bool=False, verbose:bool=True, allow_expensi
         if os.environ.get('KAGGLE_KERNEL_RUN_TYPE') and not _cuda_available():
             print('WARNING: Kaggle GPU not detected; neural inference may be very slow',flush=True)
         stage('13_install_trustmark',[sys.executable,'-m','pip','install','-q','trustmark'],timeout=1500)
-        source=out.parent/'videoseal-src'
-        if not source.exists():stage('14_clone_videoseal',['git','clone','--depth','1',
-                    'https://github.com/facebookresearch/videoseal.git',source],timeout=1200)
-        if source.exists():stage('15_install_videoseal',[sys.executable,'-m','pip','install','-q','-e',source],timeout=1600)
-        stage('16_neural_models',cli('--phase','neural','--methods','all',
+        wam_source=out.parent/'watermark-anything'
+        if not wam_source.exists():
+            stage('14_clone_wam',['git','clone','--depth','1',
+                'https://github.com/facebookresearch/watermark-anything.git',wam_source],timeout=1200)
+        if wam_source.exists():
+            stage('15_install_wam_dependencies',[sys.executable,'-m','pip','install','-q','-r',
+                wam_source/'requirements.txt'],timeout=1800)
+            checkpoint=wam_source/'checkpoints'/'wam_mit.pth'
+            if not checkpoint.exists():
+                stage('16_fetch_wam_weights',[sys.executable,'-c',
+                    'import urllib.request,sys;urllib.request.urlretrieve(sys.argv[1],sys.argv[2])',
+                    'https://dl.fbaipublicfiles.com/watermark_anything/wam_mit.pth',checkpoint],timeout=1500)
+            env['WAM_REPO_DIR']=str(wam_source)
+            env['WAM_CHECKPOINT']=str(checkpoint)
+        stage('17_neural_models',cli('--phase','neural','--methods','trustmark,wam',
                 '--host-dir',test,'--watermark',water,'--attack-preset','full',
                 '--no-save-images','--output',out/'neural'),timeout=3*3600)
 
@@ -149,14 +159,18 @@ def run_all(out:Path, *, run_neural:bool=False, verbose:bool=True, allow_expensi
                 '--preset','reviewer_stress','--output',out/'channel_ablation'],timeout=2*3600)
             stage('09_review_audit',[sys.executable,'-m','watermarklab.experiments.review_audit',
                 '--host-dir',test,'--watermark',water,'--output',out/'review_audit',
-                '--max-images','2','--host-size','512','--watermark-size','64',
-                '--attack-preset','reviewer_stress','--max-attacks','5'],timeout=2*3600)
+                '--max-images','9','--host-size','512','--watermark-size','64',
+                '--param-file',param,'--attack-preset','reviewer_stress','--max-attacks','7'],timeout=2*3600)
             stage('10_bss_validation',[sys.executable,'-m','watermarklab.experiments.bss_validation',
-                '--host',test/'airplane.bmp','--watermark',water,'--output',out/'bss_validation',
-                '--host-size','512','--watermark-size','64','--max-attacks','5'],timeout=2*3600)
+                '--host-dir',test,'--watermark',water,'--output',out/'bss_validation',
+                '--param-file',param,'--host-size','512','--watermark-size','64','--max-attacks','14'],timeout=2*3600)
             stage('11_size_sweep',cli('--phase','proposal-size-sweep','--host-dir',test,
                 '--max-images','2','--watermark',water,'--attack-preset','lite',
                 '--no-save-images','--output',out/'size_sweep'),timeout=2*3600)
+            stage('11b_block_size_comparison',[sys.executable,'-m','watermarklab.experiments.block_size_comparison',
+                '--host-dir',test,'--watermark',water,'--param-file',param,
+                '--output',out/'block_size_comparison','--block-sizes','4,8,16',
+                '--max-attacks','7'],timeout=2*3600)
             stage('12_hparam_sweep',cli('--phase','proposal-hparam-sweep','--host-dir',train,
                 '--watermark',water,'--attack-preset','lite','--max-images','1',
                 '--no-save-images','--proposal-repeat','1','--hparam-sweep-max-combinations','24',
