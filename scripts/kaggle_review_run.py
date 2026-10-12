@@ -123,8 +123,15 @@ def run_all(out:Path, *, run_neural:bool=False, verbose:bool=True, allow_expensi
             stage('14_clone_wam',['git','clone','--depth','1',
                 'https://github.com/facebookresearch/watermark-anything.git',wam_source],timeout=1200)
         if wam_source.exists():
-            stage('15_install_wam_dependencies',[sys.executable,'-m','pip','install','-q','-r',
-                wam_source/'requirements.txt'],timeout=1800)
+            # WAM's full upstream requirements pin old scientific stack versions.
+            # Kaggle Python 3.13 may attempt unsupported source builds while the
+            # official *inference* model already works with the runtime stack.
+            # Install its inference-only dependencies, retaining Kaggle's usable
+            # OpenCV / scipy / scikit-image / scikit-learn installations.
+            stage('15_install_wam_dependencies',[
+                sys.executable,'-m','pip','install','--prefer-binary',
+                'omegaconf==2.3.0','einops==0.8.0','timm==1.0.11',
+                'lpips==0.1.4','pycocotools>=2.0.8'],timeout=1800)
             checkpoint=wam_source/'checkpoints'/'wam_mit.pth'
             if not checkpoint.exists():
                 stage('16_fetch_wam_weights',[sys.executable,'-c',

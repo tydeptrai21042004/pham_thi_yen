@@ -119,7 +119,10 @@ class WAMAdapter:
         if bits.size != self.capacity:
             raise ValueError("WAM requires 32 bits")
         with self.torch.inference_mode():
-            message = self.torch.tensor(bits, dtype=self.torch.float32, device=self.device)
+            # WAM's encoder requires B x nbits, matching the batched RGB input.
+            # Passing a flat (32,) vector expands it to 32 virtual samples in
+            # MsgProcessor and crashes torch.cat (expected batch 1, got 32).
+            message = self.torch.as_tensor(bits, dtype=self.torch.float32, device=self.device).reshape(1, self.capacity)
             # Official WAM uses the whole image when no localization mask is applied.
             output = self.model.embed(self._tensor(rgb), message)
             marked = self.unnormalize(output["imgs_w"]).clamp(0, 1)[0]

@@ -100,3 +100,29 @@ def test_main_cli_has_neural_phase(tmp_path):
     assert completed.returncode == 0
     assert "neural-max-attacks" in completed.stdout
     assert "neural" in completed.stdout
+
+
+def test_wam_adapter_encoder_receives_batched_message():
+    """Catch the WAM batch-1 image / batch-32 message regression offline."""
+    torch = pytest.importorskip('torch')
+    from watermarklab.experiments.neural_baselines import WAMAdapter
+
+    class FakeModel:
+        def embed(self, img, msg):
+            assert tuple(img.shape) == (1, 3, 8, 8)
+            assert tuple(msg.shape) == (1, 32)
+            assert msg.device == img.device
+            return {'imgs_w': img}
+
+    adapter = WAMAdapter.__new__(WAMAdapter)
+    adapter.torch = torch
+    adapter.device = 'cpu'
+    adapter.capacity = 32
+    adapter.model = FakeModel()
+    adapter.transform = lambda pil: torch.from_numpy(
+        np.asarray(pil).copy().transpose(2, 0, 1)).float() / 255.0
+    adapter.unnormalize = lambda img: img
+    out = adapter.embed(np.full((8, 8, 3), 128, dtype=np.uint8),
+                        np.arange(32, dtype=np.uint8) % 2)
+    assert out.shape == (8, 8, 3)
+    assert out.dtype == np.uint8

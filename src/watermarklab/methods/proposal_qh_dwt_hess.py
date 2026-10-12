@@ -790,30 +790,36 @@ def _candidate_is_strong_enough(cand: dict, params: ProposalParams) -> bool:
 
 
 def _rank_hpos_by_energy(block0: np.ndarray) -> tuple[tuple[str, tuple[int, int]], ...]:
-    """Select the top two legal H coefficients by squared energy, at every size.
+    """Return two *group-wise* Hessenberg energy maxima, not global Top-2.
 
-    Works for 4x4, 8x8 and 16x16.  Ranking is calculated from the original
-    unmodified block (before seeing the watermark bit), over all structurally
-    valid upper-Hessenberg positions.  Energy ties use ascending row/column.
-    The existing BSS/MSE criterion subsequently chooses between these two.
+    One candidate comes from the main diagonal H[i,i]; the other comes from
+    the legal lower half of an upper-Hessenberg matrix, its first subdiagonal
+    H[i,i-1]. This corresponds to the manuscript's h22-versus-h21 distinction.
+    The two positions are selected before seeing the watermark bit, using
+    the *original* block.  Each group's ties break toward the smallest row.
+    Each group maximum is independently embedded and scored; the final
+    selector can compare both H candidates directly against the Q candidate.
+    Works at block sizes 4, 8, and 16.
     """
     block = np.asarray(block0, dtype=np.float64)
     n = int(block.shape[0])
     if block.shape != (n, n) or n not in (4, 8, 16):
         raise ValueError("H energy ranking requires a square 4, 8 or 16 block")
     H = hessenberg(block, calc_q=False)
-    candidates = []
-    for rr in range(n):
-        for cc in range(n):
-            if rr > cc + 1:  # below the first subdiagonal is structurally zero
-                continue
+
+    def strongest(group: list[tuple[int, int]]) -> tuple[str, tuple[int, int]]:
+        ranking = []
+        for rr, cc in group:
             energy = float(H[rr, cc]) ** 2
             if not math.isfinite(energy):
                 raise ValueError("nonfinite Hessenberg coefficient energy")
-            candidates.append((-energy, rr, cc))
-    candidates.sort()  # most energy first; then row/column in a tie
-    return tuple((f"h{rr + 1},{cc + 1}", (rr, cc))
-                 for _, rr, cc in candidates[:2])
+            ranking.append((-energy, rr, cc))
+        _, rr, cc = min(ranking)  # deterministic tie-breaking
+        return f"h{rr + 1},{cc + 1}", (rr, cc)
+
+    diagonal = [(i, i) for i in range(n)]
+    subdiagonal = [(i, i - 1) for i in range(1, n)]
+    return strongest(diagonal), strongest(subdiagonal)
 
 
 def _encode_hpos(pos: tuple[int, int], block_size: int) -> int:
@@ -843,15 +849,22 @@ def _decode_hpos(index: int, block_size: int) -> tuple[int, int]:
     return rr, cc
 
 
-def _best_hpos_candidate(block0: np.ndarray, bit: int, params: ProposalParams) -> dict:
-    all_h: list[dict] = []
-    valid_h: list[dict] = []
+def _hpos_group_candidates(block0: np.ndarray, bit: int, params: ProposalParams) -> list[dict]:
+    """Produce TWO independent H embedding candidates: one per energy group.
 
-    for hname, pos in _rank_hpos_by_energy(block0):
+    Do not pick a representative H candidate here. Each candidate is embedded,
+    scored and filtered separately and then competes directly with the Q-domain
+    candidate in ``_select_candidate_for_ablation``.
+    """
+    candidates: list[dict] = []
+    for group, (hname, pos) in zip(("main_diagonal", "first_subdiagonal"),
+                                   _rank_hpos_by_energy(block0)):
         hpos_idx = _encode_hpos(pos, block0.shape[0])
         block_h = _build_hpos_candidate(block0, bit, params, pos)
-        score_h, mse_h, raw_h, avg_h, worst_h, ok_h = _candidate_attack_score(block0, block_h, FLAG_HPOS, bit, params, pos=pos)
-        cand = {
+        score_h, mse_h, raw_h, avg_h, worst_h, ok_h = _candidate_attack_score(
+            block0, block_h, FLAG_HPOS, bit, params, pos=pos
+        )
+        candidates.append({
             "flag": FLAG_HPOS,
             "block": block_h,
             "score": score_h,
@@ -862,15 +875,10 @@ def _best_hpos_candidate(block0: np.ndarray, bit: int, params: ProposalParams) -
             "ok": ok_h,
             "hpos_idx": hpos_idx,
             "hpos_name": hname,
+            "h_group": group,
             "pos": pos,
-        }
-        all_h.append(cand)
-        if _candidate_is_strong_enough(cand, params):
-            valid_h.append(cand)
-
-    if valid_h:
-        return min(valid_h, key=lambda c: float(c["mse"]))
-    return min(all_h, key=lambda c: float(c["mse"]))
+        })
+    return candidates
 
 
 
@@ -978,7 +986,7 @@ class ProposalQHDWTHess:
         self.params = params if isinstance(params, ProposalParams) else ProposalParams.from_dict(params)
         if int(self.params.block_size) not in (4, 8, 16):
             raise ValueError("The experimental Q/H block-size extension supports only 4, 8 or 16")
-        # All sizes use per-block top-two H coefficient energy selection.
+        # All sizes use one diagonal and one first-subdiagonal energy maximum.
         # Q statistics and the existing score/rotation logic remain unchanged.
         self.use_optimizer = bool(use_optimizer)
         self.optimizer_trials = int(optimizer_trials)
@@ -1022,6 +1030,7 @@ class ProposalQHDWTHess:
         embedding_errors: list[str] = []
         selected_bss: list[float] = []
         selected_mse: list[float] = []
+        h_group_selected = {"main_diagonal": 0, "first_subdiagonal": 0}
         flags: list[int] = []
         hpos_list: list[int] = []
         support_counts = np.zeros(L, dtype=np.int32)
@@ -1053,7 +1062,9 @@ class ProposalQHDWTHess:
                     })
 
                 if bool(params.hpos_enabled):
-                    cands.append(_best_hpos_candidate(block0, bit, params))
+                    # Each group maximum is a distinct candidate in the final
+                    # Q vs H-diagonal vs H-subdiagonal competition.
+                    cands.extend(_hpos_group_candidates(block0, bit, params))
 
                 if params.require_contrastive_embedding:
                     # Reject configurations that already decode as the target
@@ -1074,6 +1085,8 @@ class ProposalQHDWTHess:
                     band[i : i + bs, j : j + bs] = best["block"]
                     flags.append(int(best["flag"]))
                     hpos_list.append(int(best.get("hpos_idx", HPOS_NONE)))
+                    if int(best["flag"]) == FLAG_HPOS:
+                        h_group_selected[best["h_group"]] += 1
                     selected_bss.append(float(best["score"]))
                     selected_mse.append(float(best["mse"]))
                     support_counts[kpos] += 1
@@ -1126,7 +1139,9 @@ class ProposalQHDWTHess:
                 "total_flags": int(len(flags)),
                 "parameter_snapshot": _to_json_safe(params.to_dict()),
                 "block_hash": "SHA-256",
-                "h_candidates": ["rank_1_highest_energy", "rank_2_highest_energy"],
+                "h_candidates": ["best_main_diagonal_energy", "best_first_subdiagonal_energy"],
+                "candidate_competition": "Q_vs_independent_H_main_diagonal_vs_independent_H_first_subdiagonal",
+                "h_group_selected": dict(h_group_selected),
                 "embedding_error_count_sampled": int(len(embedding_errors)),
                 "weighted_voting_removed": True,
                 "confidence_scoring_removed": True,
@@ -1136,10 +1151,11 @@ class ProposalQHDWTHess:
             }
         )
 
-        wm_meta["h_candidate_policy"] = "per_block_top_two_H_energy"
+        wm_meta["h_candidate_policy"] = "per_block_best_diagonal_and_subdiagonal_H_energy"
         wm_meta["h_energy_definition"] = "squared_H_coefficient_magnitude"
         wm_meta["h_position_encoding"] = "2 + 16 * row + column (zero based)"
-        wm_meta["h_energy_top2_count"] = 2
+        wm_meta["h_grouped_candidate_count"] = 2
+        wm_meta["h_candidate_groups"] = ["main_diagonal", "first_subdiagonal"]
 
         key = ProposalKey(
             flags=[int(x) for x in flags],
@@ -1451,6 +1467,7 @@ __all__ = [
     "_build_q4_candidate",
     "_build_hpos_candidate",
     "_rank_hpos_by_energy",
+    "_hpos_group_candidates",
     "_encode_hpos",
     "_decode_hpos",
     "_extract_bit_from_candidate_block",
