@@ -16,7 +16,7 @@ from watermarklab.common.attack import default_attack_suite, apply_attack
 from watermarklab.experiments.review_audit import load_binary,load_rgb
 from watermarklab.methods.proposal_qh_dwt_hess import (
     ProposalParams,ProposalQHDWTHess,FLAG_Q4,FLAG_HPOS,FLAG_SKIP,
-    HPOS_CANDIDATES,_rgb_to_source_bgr,_host_bgr_to_embed_space,
+    _decode_hpos,_rgb_to_source_bgr,_host_bgr_to_embed_space,
     _dwt_split_4bands,_extract_bit_from_candidate_block,
     prepare_binary_watermark_payload_from_array,
 )
@@ -41,12 +41,12 @@ def run(host:Path,watermark:Path,output:Path,*,host_size=128,watermark_size=16,r
                 if flag==FLAG_SKIP:continue
                 block=bands[ch][band][i:i+params.block_size,j:j+params.block_size]
                 hpos_idx=int(key.hpos_list[idx])
-                pos=HPOS_CANDIDATES[hpos_idx][1] if flag==FLAG_HPOS else None
                 try:
+                    pos=_decode_hpos(hpos_idx,params.block_size) if flag==FLAG_HPOS else None
                     bit=_extract_bit_from_candidate_block(block,flag,params,pos=pos)
                     survived=int(bit==int(truth[kpos]))
                     error=None
-                except (ValueError,ArithmeticError,np.linalg.LinAlgError) as exc:
+                except (ValueError,IndexError,ArithmeticError,np.linalg.LinAlgError) as exc:
                     survived=0;error=repr(exc)
                 bss=float(key.selected_bss[idx])
                 rows.append({"host":host.name,"attack":attack.name,"scheduled_index":idx,
@@ -75,7 +75,8 @@ def run(host:Path,watermark:Path,output:Path,*,host_size=128,watermark_size=16,r
             coeff,_p=spearmanr(mse_vals,survival)
             if np.isfinite(coeff): mse_corr=float(coeff)
         summary.append({"host":host.name,"attack":attack.name,"attack_group":attack.group,
-                        "samples":len(vals),"survival_rate":float(np.mean(survival)) if vals else None,
+                        "samples":len(vals),"error_count":sum(bool(v.get("error")) for v in vals),
+                        "bss_unique_levels":len(set(ranks)),"survival_unique_levels":len(set(survival)),"survival_rate":float(np.mean(survival)) if vals else None,
                         "spearman_rho_bss":correlation,"spearman_rho_neg_mse":mse_corr})
     (output/"bss_summary.json").write_text(json.dumps(summary,indent=2),encoding="utf-8")
     return summary

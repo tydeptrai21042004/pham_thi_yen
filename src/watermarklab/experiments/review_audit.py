@@ -70,6 +70,23 @@ def load_binary(path: Path, size: int | None = None) -> np.ndarray:
         return np.where(np.asarray(im) >= 127, 255, 0).astype(np.uint8)
 
 
+def side_information_sizes(key) -> dict:
+    """Estimate the JSON-encoded extraction contract, without storing private keys.
+
+    Layout keys and payload_meta are counted separately; no claim of compressed
+    optimal storage or cryptographic security is made.
+    """
+    elements = {"flags": key.flags, "hpos_list": key.hpos_list,
+                "payload_meta": key.payload_meta, "params": key.params.to_dict(),
+                "repeat_factor": int(key.repeat_factor),
+                "usable_blocks": int(key.usable_blocks), "total_blocks": int(key.total_blocks)}
+    dump = lambda item: len(json.dumps(item, sort_keys=True, default=str).encode('utf-8'))
+    result = {f"{name}_json_bytes": dump(val) for name,val in elements.items()}
+    result["full_extraction_contract_json_bytes"] = dump(elements)
+    result["original_watermark_source_bits"] = int(np.prod(key.wm_shape))
+    return result
+
+
 def audit(host_dir: Path, watermark_path: Path, output: Path, *, max_images: int = 2,
           host_size: int | None = 128, watermark_size: int | None = 16,
           repeat: int | None = None, direct_binary: bool = False, contrastive: bool = False,
@@ -104,6 +121,7 @@ def audit(host_dir: Path, watermark_path: Path, output: Path, *, max_images: int
         key_json = json.dumps({"flags": key.flags, "hpos_list": key.hpos_list,
                                "payload_meta": key.payload_meta,
                                "params": key.params.to_dict()}, sort_keys=True)
+        side_sizes = side_information_sizes(key)
         conv_bgr = _rgb_to_source_bgr(host)
         converted_only = _source_bgr_to_rgb(_embed_space_to_host_bgr(_host_bgr_to_embed_space(conv_bgr)))
         embeds.append((marked,key))
@@ -153,6 +171,7 @@ def audit(host_dir: Path, watermark_path: Path, output: Path, *, max_images: int
                              "decoder_errors":len(diag.errors),"extract_seconds":round(time.perf_counter()-t1,6),
                              "embed_seconds":round(embed_sec,6),
                              "side_info_json_bytes":len(key_json.encode("utf-8")),
+                             **side_sizes,
                              "embedded_payload_bits":int(truth.size),
                              "psnr_host_to_marked":psnr(host,marked),
                              "psnr_host_to_conversion_only":psnr(host,converted_only),
@@ -163,6 +182,10 @@ def audit(host_dir: Path, watermark_path: Path, output: Path, *, max_images: int
             except Exception as e:
                 rows.append({"host":path.name,"case":case,"error":repr(e)})
     write_csv(output/"per_case_results.csv",rows)
+    component_rows = [dict(host=r['host'], **{k: v for k,v in r.items()
+                         if k.endswith('_json_bytes') or k in ('original_watermark_source_bits','embedded_payload_bits')})
+                      for r in rows if r.get('case') == 'marked_clean' and 'error' not in r]
+    write_csv(output/"side_information_overhead.csv", component_rows)
     # These figures are a descriptive threshold audit; the threshold is fixed
     # before reviewing measurements and is NOT calibrated on the test images.
     positive=[r for r in rows if r.get("case")=="marked_clean" and r.get("watermark_nc") is not None]
