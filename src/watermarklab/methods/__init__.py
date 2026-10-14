@@ -1,6 +1,8 @@
 from __future__ import annotations
 from typing import Any
 
+from watermarklab.methods.lwt_dct_hess_abodena2022 import Abodena2022LWTDCTHessenberg
+from watermarklab.methods.contourlet_hess_su2016 import Su2016ContourletHessenberg
 from watermarklab.methods.kumar2021_dwt_entropy import Kumar2021DWTEntropy
 from watermarklab.methods.guo2017_dwt_qr_fa import Guo2017DWTQRFA
 from watermarklab.methods.gaata2022_dwt_hess_fwa import Gaata2022DWTHessFWA
@@ -13,6 +15,8 @@ from watermarklab.methods.zhu2021_iwt_svd import Zhu2021IWTSVD
 from watermarklab.methods.proposal_qh_dwt_hess import ProposalQHDWTHess, ProposalParams
 
 BASELINE_METHOD_IDS = [
+    "abodena2022_lwt_dct_hess",
+    "su2016_contourlet_hess",
     "kumar2021",
     "guo2017_dwt_qr_fa",
     "gaata2022_dwt_hess_fwa",
@@ -46,6 +50,8 @@ def build_methods(
     gaata_options = dict(gaata_options or {})
 
     all_methods = {
+        "abodena2022_lwt_dct_hess": Abodena2022LWTDCTHessenberg(mode=baseline_modes.get("abodena2022_lwt_dct_hess", "adapt")),
+        "su2016_contourlet_hess": Su2016ContourletHessenberg(mode=baseline_modes.get("su2016_contourlet_hess", "adapt")),
         "kumar2021": Kumar2021DWTEntropy(mode=baseline_modes.get("kumar2021", "adapt")),
         "guo2017_dwt_qr_fa": Guo2017DWTQRFA(mode=baseline_modes.get("guo2017_dwt_qr_fa", "adapt"), **guo_options),
         "gaata2022_dwt_hess_fwa": Gaata2022DWTHessFWA(mode=baseline_modes.get("gaata2022_dwt_hess_fwa", "adapt"), **gaata_options),
@@ -81,6 +87,8 @@ def build_methods(
 
 
 __all__ = [
+    "Abodena2022LWTDCTHessenberg",
+    "Su2016ContourletHessenberg",
     "Kumar2021DWTEntropy",
     "Guo2017DWTQRFA",
     "Gaata2022DWTHessFWA",

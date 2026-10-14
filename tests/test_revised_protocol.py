@@ -20,14 +20,14 @@ def test_full_attack_suite_has_expected_reviewer_strengths():
             'rotation_15deg','rotation_45deg'} <= names
 
 
-def test_exact_three_nine_split_excludes_lenna(tmp_path):
+def test_exact_nine_twelve_split_excludes_lenna(tmp_path):
     spec=build_split(ROOT/'data/host',tmp_path/'split.json',create_dirs=True)
-    assert len(spec['image_hashes'])==12
-    assert len(spec['train_names'])==3 and len(spec['test_names'])==9
+    assert len(spec['image_hashes'])==21
+    assert len(spec['train_names'])==9 and len(spec['test_names'])==12
     assert 'lenna.bmp' not in [x.lower() for x in spec['train_names']+spec['test_names']]
     assert set(spec['train_names']).isdisjoint(spec['test_names'])
-    assert len(list((tmp_path/'splits'/'train').glob('*.bmp')))==3
-    assert len(list((tmp_path/'splits'/'test').glob('*.bmp')))==9
+    assert len(list((tmp_path/'splits'/'train').glob('*.bmp')))==9
+    assert len(list((tmp_path/'splits'/'test').glob('*.bmp')))==12
 
 
 def test_RGB_channel_variants_encode_and_decode():

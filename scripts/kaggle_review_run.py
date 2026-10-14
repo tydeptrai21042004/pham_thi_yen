@@ -94,10 +94,10 @@ def run_all(out:Path, *, run_neural:bool=False, verbose:bool=True, allow_expensi
     split_file=scratch/'split.json'
     if not stage('00_split',[sys.executable,'-m','watermarklab.experiments.splits',
        '--host-dir',ROOT/'data/host','--output',split_file,'--create-dirs']):
-        raise RuntimeError('The immutable 12-host/3-9 split could not be constructed')
+        raise RuntimeError('The fixed 9-new-training / 12-original-testing split could not be constructed')
     manifest=json.loads(split_file.read_text());(out/'experiment_manifest.json').write_text(json.dumps(manifest,indent=2))
     train=Path(manifest['train_dir']);test=Path(manifest['test_dir'])
-    assert len(list(train.glob('*.bmp')))==3 and len(list(test.glob('*.bmp')))==9
+    assert len(list(train.glob('*.bmp')))==9 and len(list(test.glob('*.bmp')))==12
     param=out/'proposal_optimized_params.json'
     guo=out/'guo_optimized_params.json'
     gaata=out/'gaata_optimized_params.json'
@@ -166,7 +166,7 @@ def run_all(out:Path, *, run_neural:bool=False, verbose:bool=True, allow_expensi
                 '--preset','reviewer_stress','--output',out/'channel_ablation'],timeout=2*3600)
             stage('09_review_audit',[sys.executable,'-m','watermarklab.experiments.review_audit',
                 '--host-dir',test,'--watermark',water,'--output',out/'review_audit',
-                '--max-images','9','--host-size','512','--watermark-size','64',
+                '--max-images','12','--host-size','512','--watermark-size','64',
                 '--param-file',param,'--attack-preset','reviewer_stress','--max-attacks','7'],timeout=2*3600)
             stage('10_bss_validation',[sys.executable,'-m','watermarklab.experiments.bss_validation',
                 '--host-dir',test,'--watermark',water,'--output',out/'bss_validation',

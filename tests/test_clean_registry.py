@@ -3,6 +3,8 @@ from watermarklab.methods import build_methods, BASELINE_METHOD_IDS, DEFAULT_MET
 
 def test_clean_method_registry_contains_only_requested_methods():
     assert BASELINE_METHOD_IDS == [
+        "abodena2022_lwt_dct_hess",
+        "su2016_contourlet_hess",
         "kumar2021",
         "guo2017_dwt_qr_fa",
         "gaata2022_dwt_hess_fwa",

@@ -143,7 +143,7 @@ class SpatialChunk4096:
             try:
                 encoded = self.native.embed(source, block)
             except Exception as exc:
-                raise RuntimeError(f"{self.name}: encode chunk {i+1}/{self.chunk_count} failed") from exc
+                raise RuntimeError(f"{self.name}: encode chunk {i+1}/{self.chunk_count} failed: {type(exc).__name__}: {exc}") from exc
             encoded = np.asarray(encoded)
             if encoded.ndim != 3 or encoded.shape[-1] != 3:
                 raise ValueError(f"Unexpected native image shape for chunk {i}: {encoded.shape}")
@@ -256,6 +256,8 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
                 "watermark_sha256":manifest["watermark_sha256"],
                 "method":method,"native_capacity":wrapper.capacity,"region_cols":wrapper.cols,
                 "resize_to":wrapper.resize_to,"attacks":[c.name for c in cases],
+                "device":device,"model_type":model_type,"force_full":force_full,
+                "save_images":save_images,
                 "clean_gate":{"max_ber":max_clean_ber,"min_coverage":min_clean_coverage}}
             # Never resume results from an unrelated watermark/configuration.
             if per_host.exists() and sidecar.exists() and json.loads(sidecar.read_text())==run_contract:
@@ -344,7 +346,12 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
                   'exact_recovery','decoded_chunks','embedding_time_sec','extraction_time_sec'):
             row[k+'_mean']=float(pd.to_numeric(grp[k],errors='coerce').mean())
         summaries.append(row)
-    pd.DataFrame(summaries).to_csv(output/'comparison_4096.csv',index=False)
+    summary_columns=['method_id','phase','n','failure_aware_protocol'] + [
+        k+'_mean' for k in ('psnr','ssim','nc','ber','nc_zero_fill','ber_erasure_as_error',
+                           'bit_coverage','exact_recovery','decoded_chunks',
+                           'embedding_time_sec','extraction_time_sec')]
+    # Keep a readable CSV schema even if every embed fails and no summary row exists.
+    pd.DataFrame(summaries,columns=summary_columns).to_csv(output/'comparison_4096.csv',index=False)
     failed_cases=[x for x in all_rows if x.get('phase')=='embedding_failed' or
                   (x.get('phase')=='after_attack' and x.get('error'))]
     clean_rejected=[x for x in all_rows if x.get('phase')=='before_attack' and

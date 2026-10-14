@@ -65,3 +65,50 @@ Method id: `roy2018_dwt_svd`. This baseline follows Roy and Pal's YCbCr-Y blockw
 - Same embedding structure as `qwt_qsvd_zhang2022_blind`.
 - Extraction type: semi-blind, preserving the paper's second extraction mode using selector information.
 - Main table placement: semi-blind / side-information table.
+
+## Added paper baselines (2022 LWT-DCT-HD, 2016 Contourlet-HD)
+
+Two *blind*, paper-guided baselines were added under separate method IDs. No
+proposal code or proposal parameters were changed.
+
+| ID | Original paper (DOI) | Original protocol | This project's **adapt** protocol |
+|---|---|---|---|
+| `abodena2022_lwt_dct_hess` | Abodena (2022), 10.51984/JOPAS.V21I2.1934 | grayscale 1024x1024, two-level LWT -> DCT -> 4x4 Hessenberg H(1,1), 64x64 watermark, entropy scale | RGB 512x512 -> Y, ONE Haar-lifting level to give 4096 4x4 blocks; keyed ordering, entropy-based quantization with uint8-safe minimum, Y->RGB. 4096 real bits (not 1024). |
+| `su2016_contourlet_hess` | Su et al. (2016), 10.1007/s11042-016-3522-z | RGB 512x512, 32x32 color watermark (24,576 bits), one-level Contourlet LP low-pass, 4x4 Hessenberg max-energy coefficient, keyed MD5 block selection, Arnold scrambling, T=16 | RGB 512x512, *single blue channel* LP low-pass 256x256 and 4096 blocks, 64x64 binary watermark, Arnold + MD5 ordering; T=16. |
+
+**Method-fidelity boundaries:** Neither paper releases the complete filter,
+quantization, and key-generation specifications needed for a bit-for-bit MATLAB
+reproduction. Abodena does not specify the chosen LWT lifting filter or the
+entropy histogram binning; the paper inconsistently labels its second-level band as both a detail
+and an approximation, and printed Eqs. 6–12 have a candidate/parity
+ambiguity. Here the diagonal detail of the second LWT level is selected. The adapted implementation uses a consistent ceil-parity target and
+an empirically documented minimum step of 30 for uint8 stability. Su does not
+specify the exact Contourlet LP filters; the implementation uses a 2x2 box
+Laplacian pyramid with explicit highpass residual, which ensures perfect
+reconstruction before uint8 rounding. Because embedding is confined to the
+lowpass band, the Contourlet directional detail bank is *not computed*; this is
+not an exact NSCT/DFB reproduction. These two algorithms MUST be labelled
+**paper-guided adaptations**, not original implementations or the authors' code.
+
+Neither method requires the original host or watermark at extraction. The
+Abodena extraction key stores one quantization strength scalar in addition to
+the seed and shape; Su stores T, seed, and Arnold rounds. Neither key contains
+image-dependent matrices or the original logo. Disclose key/metadata bytes in
+side-information reporting when applicable.
+
+For paper-original numbers use `--baseline-mode original`, which writes a
+separate `original_reported/` export and never mixes it with rerun results.
+Do not pool 2016's 24,576-bit *color* watermark metrics or 2022's 1024x1024
+grayscale metrics with this project's native 4096-bit RGB benchmark numbers.
+
+### Run only the two new baselines
+
+```bash
+python main.py --methods abodena2022_lwt_dct_hess,su2016_contourlet_hess --attack-preset lite --output results/new_hessenberg_baselines
+python -m pytest -q tests/test_paper_hess_baselines_2016_2022.py
+```
+
+The algorithms use the original 64x64 watermark pixels as 4096 input bits;
+**do not calculate payload size after transforming the watermark**. All NC,
+BER, PSNR, SSIM, and attack-result files come from the benchmark's unchanged
+metric/export pipeline.

@@ -57,7 +57,7 @@ For publication, match this audit's host/watermark sizes and host split to the m
 
 Install project requirements first. TrustMark requires `pip install trustmark`. For WAM, obtain the official `facebookresearch/watermark-anything` checkout, dependencies and MIT checkpoint; set `WAM_REPO_DIR` and `WAM_CHECKPOINT`. Use a GPU if available; the 128 independent WAM calls per image can be extremely expensive.
 
-The existing split generator can create three tuning and nine held-out hosts:
+The fixed dataset split uses the **nine newly uploaded BMPs for tuning** and **all twelve original non-Lenna BMPs for held-out testing** (including the former three tuning images):
 
 ```bash
 python -m watermarklab.experiments.splits \

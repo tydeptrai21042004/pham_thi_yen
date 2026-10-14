@@ -75,11 +75,11 @@ try:
     if help_result.returncode or 'neural-max-attacks' not in help_result.stdout:
         raise RuntimeError('This GitHub checkout lacks the patch. Commit/push the attached patch files before cloning.')
 
-    # Exact manuscript 12 host (excluding Lenna), 3 tuning / 9 held-out split.
+    # Fixed 21-host protocol: nine newly provided tuning BMPs, twelve original held-out BMPs; Lenna excluded.
     from pathlib import Path as _P
     split_script = [sys.executable,'-m','watermarklab.experiments.splits',
                    '--host-dir',REPO/'data/host','--output',OUT/'host_split.json','--create-dirs']
-    if not run('split_3_9',split_script,cwd=REPO,timeout_seconds=240):
+    if not run('split_9_12',split_script,cwd=REPO,timeout_seconds=240):
         raise RuntimeError('Frozen held-out split failed')
     split=json.loads((OUT/'host_split.json').read_text())
     test_dir=Path(split['test_dir'])

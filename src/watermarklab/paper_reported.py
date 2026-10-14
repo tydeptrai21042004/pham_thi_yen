@@ -3,7 +3,7 @@ from typing import Any
 from pathlib import Path
 import pandas as pd
 
-BASELINE_IDS = {"kumar2021", "guo2017_dwt_qr_fa", "gaata2022_dwt_hess_fwa", "dwt_hd_svd_2025", "hess_nha2023", "roy2018_dwt_svd", "dwt_wht_svd_2024", "qwt_qsvd_zhang2022_blind", "qwt_qsvd_zhang2022_semiblind"}
+BASELINE_IDS = {"kumar2021", "guo2017_dwt_qr_fa", "gaata2022_dwt_hess_fwa", "dwt_hd_svd_2025", "hess_nha2023", "roy2018_dwt_svd", "dwt_wht_svd_2024", "qwt_qsvd_zhang2022_blind", "qwt_qsvd_zhang2022_semiblind", "abodena2022_lwt_dct_hess", "su2016_contourlet_hess"}
 
 def _r(method_id: str, paper: str, table: str, phase: str, image: str, attack: str, metric: str, value: Any, unit: str = "", note: str = ""):
     return {"method_id": method_id, "paper": paper, "table": table, "mode": "original_reported", "phase": phase, "image": image, "attack": attack, "metric": metric, "value": value, "unit": unit, "note": note}
@@ -16,6 +16,24 @@ def _mean(vals):
 def paper_reported_rows(method_ids: list[str] | None = None) -> list[dict[str, Any]]:
     ids = set(method_ids or BASELINE_IDS)
     rows: list[dict[str, Any]] = []
+    if "abodena2022_lwt_dct_hess" in ids:
+        p = "Abodena 2022, JOPAS, DOI:10.51984/JOPAS.V21I2.1934"
+        for cover, values in {
+            "Lena": (44.880, 44.882, 44.880),
+            "Sailboat": (41.854, 41.850, 41.857),
+            "Peppers": (43.954, 43.955, 43.952),
+            "Baboon": (37.483, 37.481, 37.485),
+            "Airplane": (46.375, 46.371, 46.371),
+        }.items():
+            for i, value in enumerate(values, 1):
+                rows.append(_r("abodena2022_lwt_dct_hess", p, "Table 1", "before_attack", cover, f"watermark{i}_no_attack", "PSNR", value, "dB", note="Original: 1024x1024 grayscale host; do not compare numerically as a matched 512x512 RGB experiment."))
+                rows.append(_r("abodena2022_lwt_dct_hess", p, "Table 2", "before_attack", cover, f"watermark{i}_no_attack", "NC_watermark", 1.0, note="Original 1024x1024 grayscale paper experiment."))
+    if "su2016_contourlet_hess" in ids:
+        p = "Su et al. 2016, Multimedia Tools and Applications, DOI:10.1007/s11042-016-3522-z"
+        for wm, psnr_value, ssim_value in [("A",48.3033,0.9955),("B",48.3250,0.9955),("C",48.2979,0.9955),("D",48.2954,0.9955)]:
+            rows.append(_r("su2016_contourlet_hess", p, "Table 1 Average", "before_attack", "Average", f"watermark_{wm}_no_attack", "PSNR", psnr_value, "dB", note="Original 32x32 color watermark (24576 bits); local comparison uses 64x64 binary 4096-bit adapter."))
+            rows.append(_r("su2016_contourlet_hess", p, "Table 1 Average", "before_attack", "Average", f"watermark_{wm}_no_attack", "SSIM", ssim_value, note="Original 32x32 color watermark, not the matched 4096-bit comparison."))
+        rows.append(_r("su2016_contourlet_hess", p, "Section 4", "metadata", "All", "embedding_strength", "quantization_step_T", 16, note="Published quantization step."))
     if "kumar2021" in ids:
         p = "Kumar and Singh 2021"
         rows += [

@@ -1,5 +1,32 @@
 # WatermarkLab cleaned baseline project
 
+## Updated 9-training / 12-testing host protocol
+
+**Train/tune on the nine newly uploaded 512x512 RGB BMP images in `data/host_train/`; test on all twelve original (non-Lenna) host images in `data/host/`.** The three previous tuning hosts (`baboon.bmp`, `safari.bmp`, `sailboat.bmp`) are now included in testing. `lenna.bmp` stays excluded. Neither the proposed method nor the baseline algorithms are changed.
+
+```bash
+python -m watermarklab.experiments.splits --host-dir data/host --output results/final_9_12/split.json --create-dirs
+python -m pytest -q tests/test_dataset_9_train_12_test.py
+```
+
+See **[`docs/DATASET_SPLIT_9TRAIN_12TEST.md`](docs/DATASET_SPLIT_9TRAIN_12TEST.md)** for complete image lists, reproduction instructions, and rerun requirements.
+
+
+## Added baselines: Abodena2022 and Su2016
+
+Two additional **blind**, paper-guided 4096-bit baselines are registered:
+`abodena2022_lwt_dct_hess` (LWT-DCT-Hessenberg, 2022) and
+`su2016_contourlet_hess` (Contourlet-LP-Hessenberg, 2016).
+They operate on the original 64x64 binary watermark and use the same 512x512
+RGB host set, attacks, and metrics as existing methods. Neither one changes
+`proposal_qh_dwt_hess.py`. See `docs/BASELINE_METHODS.md` for the specific
+published-algorithm differences and reproducibility limitations.
+
+```bash
+python main.py --methods abodena2022_lwt_dct_hess,su2016_contourlet_hess --max-images 2 --attack-preset lite --output results/hessenberg_new
+python -m pytest -q tests/test_paper_hess_baselines_2016_2022.py
+```
+
 This is the cleaned version of your watermarking project. It keeps only:
 
 1. **Paper 1 — Kumar 2021**: DWT + maximum entropy + alpha blending.

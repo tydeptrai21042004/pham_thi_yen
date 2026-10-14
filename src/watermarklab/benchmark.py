@@ -421,6 +421,14 @@ def run_benchmark(
                 extract_clean_time = time.perf_counter() - t1
 
                 key_info = {"proposal_param_source": param_source, "proposal_block_size": int(key.params.block_size), "proposal_effective_configuration": json.dumps(key.params.to_dict(), sort_keys=True, default=_json_default)} if method_id == "proposal" else {}
+                if method_id in {"abodena2022_lwt_dct_hess", "su2016_contourlet_hess"}:
+                    key_info["baseline_protocol"] = "paper_guided_4096_bit_adaptation"
+                    key_info["baseline_payload_bits"] = int(watermark.size)
+                    key_info["baseline_extraction_type"] = "blind"
+                    key_info["baseline_carrier"] = str(key.channel)
+                    key_info["baseline_mode"] = str(key.mode)
+                    key_info["baseline_quantization_parameter"] = float(getattr(key, "alpha", getattr(key, "step", 0.0)))
+                    key_info["baseline_lwt_levels"] = int(key.levels) if hasattr(key, "levels") else None
                 if method_id == "gaata2022_dwt_hess_fwa" and isinstance(method, Gaata2022DWTHessFWA):
                     key_info["gaata_param_source"] = gaata_param_source
                     key_info["gaata_decimal_position"] = int(method.config.decimal_position)
@@ -2151,7 +2159,7 @@ def main():
     parser.add_argument("--host-dir", default="data/host")
     parser.add_argument("--watermark", default="data/watermark/wm.png")
     parser.add_argument("--output", default="results/common_benchmark")
-    parser.add_argument("--methods", default="all", help="Comma-separated: all,baselines,kumar2021,guo2017_dwt_qr_fa,gaata2022_dwt_hess_fwa,dwt_hd_svd_2025,hess_nha2023,roy2018_dwt_svd,dwt_wht_svd_2024,qwt_qsvd_zhang2022_blind,qwt_qsvd_zhang2022_semiblind,zhu2021_iwt_svd_adapted,proposal")
+    parser.add_argument("--methods", default="all", help="Comma-separated: all,baselines,kumar2021,guo2017_dwt_qr_fa,gaata2022_dwt_hess_fwa,dwt_hd_svd_2025,hess_nha2023,roy2018_dwt_svd,dwt_wht_svd_2024,qwt_qsvd_zhang2022_blind,qwt_qsvd_zhang2022_semiblind,zhu2021_iwt_svd_adapted,abodena2022_lwt_dct_hess,su2016_contourlet_hess,proposal")
     parser.add_argument("--neural-device", default="auto", choices=["auto", "cpu", "cuda"], help="Neural phase: device for WAM (TrustMark uses its upstream default).")
     parser.add_argument("--neural-model-type", default="Q", choices=["B", "C", "P", "Q"], help="Neural phase: TrustMark model variant.")
     parser.add_argument("--neural-max-attacks", type=int, default=0, help="Neural phase: attack count limit per host (0 = entire preset).")
@@ -2169,6 +2177,8 @@ def main():
     parser.add_argument("--roy-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"], help="Roy2018 mode: adapt/original-rerun run the local DWT-SVD baseline; original writes paper-reported rows.")
     parser.add_argument("--dwt-wht-svd-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"], help="DWT-WHT-SVD2024 mode: adapt/original-rerun run the semi-blind local baseline; original writes paper-reported rows if available.")
     parser.add_argument("--qwt-qsvd-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"], help="Zhang2022 QWT-QSVD mode for both blind and semi-blind variants.")
+    parser.add_argument("--abodena-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"], help="Abodena2022: adapt = one LWT level for 512x512; original-rerun requires 1024x1024.")
+    parser.add_argument("--su2016-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"], help="Su2016: 512x512 4096-bit adapted LP lowpass baseline.")
     parser.add_argument("--zhu-iwt-svd-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"], help="Zhu2021 IWT-SVD mode. adapt uses the 64x64 YCbCr-Y benchmark adapter; original/original-rerun is for native 32x32 grayscale experiments.")
 
     parser.add_argument("--guo-param-file", default=DEFAULT_GUO_PARAM_FILE, help="JSON file written by Guo Firefly optimization phase. Normal phase loads it automatically when it exists.")
@@ -2320,6 +2330,8 @@ def main():
         return args.baseline_mode if value == "inherit" else value
 
     baseline_modes = {
+        "abodena2022_lwt_dct_hess": _mode(args.abodena_mode),
+        "su2016_contourlet_hess": _mode(args.su2016_mode),
         "kumar2021": _mode(args.kumar_mode),
         "guo2017_dwt_qr_fa": _mode(args.guo_mode),
         "gaata2022_dwt_hess_fwa": _mode(args.gaata_mode),
