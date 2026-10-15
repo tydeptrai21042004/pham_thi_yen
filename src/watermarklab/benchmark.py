@@ -1,6 +1,8 @@
 from __future__ import annotations
 import argparse
 import csv
+import hashlib
+import os
 import itertools
 import json
 import time
@@ -598,12 +600,47 @@ def run_proposal_optimization_phase(
     attack_suite = default_attack_suite(include_none=False, preset=attack_preset)
     base_params = ProposalParams.from_dict({"repeat": repeat})
 
-    per_image: dict[str, Any] = {}
-    rows: list[dict[str, Any]] = []
+    # Persist each expensive calculation immediately. Checkpoints are tied to
+    # byte-identical training images, watermark and optimizer settings: no
+    # accidental reuse of parameters from a different training protocol.
+    contract = {
+        "files": {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                  for p in [*host_paths, Path(watermark_path)]},
+        "repeat": "full" if repeat is None else int(repeat),
+        "invert_watermark": bool(invert_watermark),
+        "attack_preset": str(attack_preset),
+        "n_fireflies": n_fireflies, "n_generations": n_generations,
+        "alpha": alpha, "beta0": beta0, "gamma": gamma,
+        "alpha_decay": alpha_decay, "seed": seed,
+    }
+    fingerprint = hashlib.sha256(json.dumps(contract, sort_keys=True).encode()).hexdigest()
+    progress_file = output_file.with_name(output_file.stem + ".progress.json")
+    if progress_file.exists():
+        progress = json.loads(progress_file.read_text(encoding="utf-8"))
+        if progress.get("fingerprint") != fingerprint:
+            raise ValueError(f"Existing optimization checkpoint uses a different input/configuration: {progress_file}. "
+                             "Use the original protocol or a new --proposal-param-file path.")
+    else:
+        progress = {"fingerprint": fingerprint, "contract": contract,
+                    "per_image": {}, "rows": [], "selection": {}}
+
+    def checkpoint():
+        tmp = progress_file.with_suffix(".json.tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(progress, f, indent=2, ensure_ascii=False, default=_json_default)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, progress_file)
+
+    per_image: dict[str, Any] = dict(progress["per_image"])
+    rows: list[dict[str, Any]] = list(progress["rows"])
     global_best: dict[str, Any] | None = None
     global_best_obj = -1e18
 
     for idx, host_path in enumerate(host_paths):
+        if host_path.stem in per_image:
+            print(f"[OPT RESUME] {host_path.name}: cached", flush=True)
+            continue
         host = load_host_rgb(host_path)
         method = ProposalQHDWTHess(params=base_params, use_optimizer=False, optimizer_trials=n_fireflies, optimizer_seed=seed + idx * 100000)
         best_params, record = method.optimize_params(
@@ -655,6 +692,9 @@ def run_proposal_optimization_phase(
             "h01_margin": float(best_params.h01_margin),
         }
         rows.append(row)
+        progress["per_image"] = per_image
+        progress["rows"] = rows
+        checkpoint()
         print(f"[OPT] {host_path.name}: objective={objective:.6f}, q4_tau={best_params.q4_tau:.6f}, q4_margin={best_params.q4_margin:.6f}, h01_q={best_params.h01_q:.6f}, h01_margin={best_params.h01_margin:.6f}")
 
     # One frozen configuration for *all* held-out images. Select among the
@@ -664,16 +704,23 @@ def run_proposal_optimization_phase(
     for candidate_host in host_paths:
         candidate_entry = per_image[candidate_host.stem]
         candidate_params = ProposalParams.from_dict(candidate_entry["params"])
+        # Checkpoint after EVERY candidate/host comparison (81 in total).
+        # These evaluations are the expensive part after the initial 9 searches.
+        outcomes = list(progress["selection"].get(candidate_host.name, []))
+        if len(outcomes) > len(host_paths):
+            raise ValueError("Corrupt candidate-selection checkpoint")
         evaluator = ProposalQHDWTHess(params=candidate_params, use_optimizer=False)
-        outcomes=[]
-        for train_host in host_paths:
+        for train_host in host_paths[len(outcomes):]:
             measure = evaluator._evaluate_params_for_optimization(
                 load_host_rgb(train_host), watermark, candidate_params, attack_suite=attack_suite)
             outcomes.append(float(measure.get("objective", -1e9)))
-        average = float(np.mean(outcomes))
-        candidate_selection.append({"candidate_source":candidate_host.name,
-            "train_host_objectives":outcomes,"mean_train_objective":average,
-            "params":candidate_params.to_dict()})
+            progress["selection"][candidate_host.name] = outcomes
+            checkpoint()
+            print(f"[OPT SELECT] {candidate_host.name} x {train_host.name}: "
+                  f"{len(outcomes)}/{len(host_paths)}", flush=True)
+        candidate_selection.append({"candidate_source": candidate_host.name,
+            "train_host_objectives": outcomes, "mean_train_objective": float(np.mean(outcomes)),
+            "params": candidate_params.to_dict()})
     winner = max(candidate_selection, key=lambda x:x["mean_train_objective"])
     global_best = {"image":winner["candidate_source"],"filename":winner["candidate_source"],
                    "params":winner["params"],"objective":winner["mean_train_objective"],
@@ -681,6 +728,7 @@ def run_proposal_optimization_phase(
 
     payload = {
         "format": OPT_PARAM_FORMAT,
+        "optimization_contract_sha256": fingerprint,
         "training_selection":candidate_selection,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "host_dir": str(host_dir),
@@ -691,8 +739,12 @@ def run_proposal_optimization_phase(
         "global_best": global_best,
         "per_image": per_image,
     }
-    with open(output_file, "w", encoding="utf-8") as f:
+    tmp_final = output_file.with_suffix(".json.tmp")
+    with tmp_final.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False, default=_json_default)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_final, output_file)
 
     csv_path = output_file.with_suffix(".csv")
     if rows:

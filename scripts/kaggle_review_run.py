@@ -25,6 +25,10 @@ MAX_SECONDS=int(10.5*3600)
 
 
 def run_all(out:Path, *, run_neural:bool=False, verbose:bool=True, allow_expensive:bool=True):
+    if run_neural:
+        raise ValueError('Native 61/32-bit neural benchmarks are disabled in this patch. '
+                         'Use scripts/recover_missing_results.py --step neural4096 '
+                         'for the 4096-bit-only experiments.')
     out=out.resolve(); out.mkdir(parents=True,exist_ok=True)
     scratch=out.parent/(out.name+'_scratch')
     scratch.mkdir(exist_ok=True)

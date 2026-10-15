@@ -1,119 +1,142 @@
-# Copy the WHOLE script into ONE Kaggle Python cell.
-# Notebook Settings -> Internet ON; GPU recommended for WAM.
-# IMPORTANT: FIRST commit/push the neural patch files to the GitHub repository.
-# This script clones your own updated code, installs optional pretrained models,
-# runs held-out hosts, and keeps ZIP checkpoints; no uploaded source ZIP needed.
+# ONE KAGGLE CELL -- complete classical + reviewer + 4,096-bit neural (NO native neural payload runs).
+# Upload these files as Kaggle datasets (Notebook: Internet ON, GPU ON):
+#   1) pham_thi_yen-main(20261015-090635).zip (the exact project base)
+#   2) WatermarkLab_ALL_EXPERIMENTS_FIXED_PATCH.zip (the patch from ChatGPT)
+#   3) watermark_all_results_9train_12test.zip (previous results or latest checkpoint)
+# Repeat this cell across sessions when required. Upload each latest results checkpoint to the NEXT
+# Kaggle session, so previous attacks are NOT lost. This is CPU/GPU-intensive.
+# The real 4096-bit bitmap is split into native network-sized chunks spatially;
+# this is an experimental adaptation, not 4096-bit native model support.
 from pathlib import Path
-import csv, json, os, random, shutil, subprocess, sys, time, zipfile
+import hashlib, json, os, shutil, subprocess, sys, urllib.request, zipfile
 
-REPO_URL = 'https://github.com/tydeptrai21042004/pham_thi_yen.git'
-BASE = Path('/kaggle/working') if Path('/kaggle/working').exists() else Path.cwd()
-REPO = BASE / 'pham_thi_yen'
-OUT = BASE / 'pham_yen_neural_results'
-OUT.mkdir(parents=True, exist_ok=True)
-ZIP_PATH = BASE / 'pham_yen_neural_results.zip'
-HOST_SEED = 3101
-METHODS_TO_RUN = ('trustmark', 'wam')  # native payload capacities differ
-ATTACK_PRESET = 'full'
-MAX_ATTACKS = 0  # 0 = all; choose 2 for fast smoke testing
-SAFE_STOP_SECONDS = int(10.25 * 3600)
-START = time.monotonic()
+STEP = 'all'         # neural4096 | optimize | heldout | reviewer | extras | all
+MAX_JOBS_PER_RUN = 0        # jobs until session budget; 0 = unlimited
+MAX_SECONDS_PER_RUN = 32000
+TASK_TIMEOUT_SECONDS = 30000
+CHECKPOINT_SECONDS = 600    # automatic ZIP snapshots during long jobs
+RESUME_ZIP = None           # path to manually select a results checkpoint, or None
 
-# Existing torch/torchvision provided by Kaggle should remain the preferred CUDA build.
-ENV = os.environ.copy()
-ENV.update(PYTHONPATH=str(REPO / 'src'), PYTHONUNBUFFERED='1',
-           OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1', MKL_NUM_THREADS='1')
-
-
-def save_zip(note):
-    (OUT/'kaggle_status.json').write_text(json.dumps({'note': note, 'elapsed_h': round((time.monotonic()-START)/3600,3)}, indent=2))
-    tmp = BASE/'pham_yen_neural_results.incomplete.zip'
-    with zipfile.ZipFile(tmp, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True) as archive:
-        for file in OUT.rglob('*'):
-            if file.is_file() and file.suffix not in ('.tmp', '.lock') and 'splits' not in file.parts:
-                archive.write(file, str(file.relative_to(BASE)))
-    tmp.replace(ZIP_PATH)
-    print(f'[SAVE] {note}: {ZIP_PATH} ({ZIP_PATH.stat().st_size/1048576:.1f} MiB)', flush=True)
+WORK = Path('/kaggle/working') if Path('/kaggle/working').is_dir() else Path.cwd()
+INPUT = Path('/kaggle/input')
+REPO = WORK / 'pham_thi_yen'
+OUTPUT = WORK / 'watermark_all_results_9train_12test'
+SOURCE_NAME = 'pham_thi_yen-main(20261015-090635).zip'
+PATCH_NAME = 'WatermarkLab_ALL_EXPERIMENTS_FIXED_PATCH.zip'
+RESULT_NAME = 'watermark_all_results_9train_12test.zip'
+# SHA-256 of the proposal method in this user's supplied base ZIP.
+EXPECTED_PROPOSAL_SHA256 = '10aaca9b328e14515c20d6684e0b96f8b9a527d3bdbb7acd442c953e8405716d'
 
 
-def run(label, cmd, *, cwd=None, timeout_seconds=7200):
-    print(f'\n[{label}] {" ".join(map(str,cmd))}', flush=True)
-    log = OUT / (label+'.log')
-    started, last_checkpoint = time.monotonic(), time.monotonic()
-    with log.open('w', encoding='utf-8') as writer:
-        proc = subprocess.Popen(list(map(str,cmd)), cwd=cwd or BASE, env=ENV,
-                                stdout=writer, stderr=subprocess.STDOUT, start_new_session=True)
-        while proc.poll() is None:
-            if time.monotonic()-START > SAFE_STOP_SECONDS or time.monotonic()-started > timeout_seconds:
-                import signal
-                os.killpg(proc.pid, signal.SIGTERM)
-                try: proc.wait(timeout=15)
-                except subprocess.TimeoutExpired:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                    proc.wait()
-                print(f'[LIMIT] {label} interrupted; partial outputs retained', flush=True)
-                break
-            if time.monotonic()-last_checkpoint >= 600:
-                save_zip(f'during {label}')
-                last_checkpoint=time.monotonic()
-            time.sleep(5)
-    result = proc.wait()
-    save_zip(f'{label}: exit={result}')
-    print(f'[{label}] exit={result}. Log: {log}', flush=True)
-    return result == 0
+def run(cmd, *, cwd=None, required=True):
+    print('>>>', ' '.join(map(str, cmd)), flush=True)
+    result = subprocess.run(list(map(str, cmd)), cwd=cwd or WORK, check=False)
+    if required and result.returncode != 0:
+        raise RuntimeError(f'Command failed with {result.returncode}: {cmd}')
+    return result.returncode
 
 
-try:
-    if not (REPO/'.git').exists():
-        if not run('clone', ['git','clone','--depth','1',REPO_URL,REPO], timeout_seconds=360):
-            raise RuntimeError('Git clone failed: check Internet.')
-    else:
-        run('pull', ['git','-C',REPO,'pull','--ff-only'])
-    if not run('base_requirements', [sys.executable,'-m','pip','install','-q','-r',REPO/'requirements.txt'], timeout_seconds=1200):
-        raise RuntimeError('Basic project dependency installation failed.')
-    help_result=subprocess.run([sys.executable,'main.py','--help'],cwd=REPO,env=ENV,capture_output=True,text=True)
-    if help_result.returncode or 'neural-max-attacks' not in help_result.stdout:
-        raise RuntimeError('This GitHub checkout lacks the patch. Commit/push the attached patch files before cloning.')
+def overlay(archive: Path):
+    with zipfile.ZipFile(archive) as z:
+        if z.testzip() is not None:
+            raise RuntimeError(f'Corrupted input ZIP: {archive}')
+        n = 0
+        for member in z.infolist():
+            if member.is_dir():
+                continue
+            parts = Path(member.filename).parts
+            if (len(parts) < 2 or parts[0] != 'pham_thi_yen-main'
+                    or '..' in parts or member.filename.startswith('/')):
+                raise ValueError(f'Unsafe/unexpected project archive member: {member.filename}')
+            dest = REPO.joinpath(*parts[1:])
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with z.open(member) as src, dest.open('wb') as dst:
+                shutil.copyfileobj(src,dst)
+            n += 1
+    print(f'Overlay installed: {archive.name} ({n} files)', flush=True)
 
-    # Fixed 21-host protocol: nine newly provided tuning BMPs, twelve original held-out BMPs; Lenna excluded.
-    from pathlib import Path as _P
-    split_script = [sys.executable,'-m','watermarklab.experiments.splits',
-                   '--host-dir',REPO/'data/host','--output',OUT/'host_split.json','--create-dirs']
-    if not run('split_9_12',split_script,cwd=REPO,timeout_seconds=240):
-        raise RuntimeError('Frozen held-out split failed')
-    split=json.loads((OUT/'host_split.json').read_text())
-    test_dir=Path(split['test_dir'])
-    test=[Path(x) for x in split['test']]
-    print('Held-out:', [p.name for p in test])
-    save_zip('host split prepared')
 
-    if 'trustmark' in METHODS_TO_RUN and run('install_trustmark', [sys.executable,'-m','pip','install','-q','trustmark'], timeout_seconds=1200):
-        run('trustmark', [sys.executable,'main.py','--phase','neural','--methods','trustmark',
-                          '--host-dir',test_dir,'--attack-preset',ATTACK_PRESET,
-                          '--neural-max-attacks',str(MAX_ATTACKS),'--no-save-images',
-                          '--output',OUT/'heldout_trustmark'], cwd=REPO, timeout_seconds=14400)
-    if 'wam' in METHODS_TO_RUN:
-        wam_source=BASE/'watermark-anything'
-        if not wam_source.is_dir():
-            if not run('wam_checkout',['git','clone','--depth','1',
-                'https://github.com/facebookresearch/watermark-anything.git',wam_source],timeout_seconds=1200):
-                raise RuntimeError('Could not clone the official WAM repository')
-        if not run('wam_deps',[sys.executable,'-m','pip','install','-q','-r',wam_source/'requirements.txt'],timeout_seconds=1800):
-            raise RuntimeError('Official WAM dependencies failed to install')
-        weights=wam_source/'checkpoints'/'wam_mit.pth'
-        if not weights.is_file():
-            if not run('wam_mit_checkpoint',[sys.executable,'-c',
-                'import urllib.request,sys;urllib.request.urlretrieve(sys.argv[1],sys.argv[2])',
-                'https://dl.fbaipublicfiles.com/watermark_anything/wam_mit.pth',weights],timeout_seconds=1800):
-                raise RuntimeError('Official WAM pretrained weights missing')
-        ENV['WAM_REPO_DIR']=str(wam_source)
-        ENV['WAM_CHECKPOINT']=str(weights)
-        run('wam',[sys.executable,'main.py','--phase','neural','--methods','wam',
-                   '--host-dir',test_dir,'--attack-preset',ATTACK_PRESET,
-                   '--neural-max-attacks',str(MAX_ATTACKS),'--neural-device','auto',
-                   '--no-save-images','--output',OUT/'heldout_wam'],
-            cwd=REPO,timeout_seconds=14400)
-    print('Neural benchmark outputs saved separately; DO NOT merge with the 1024-bit embedded LL payload or nominal 4096-pixel watermark comparison table.')
-finally:
-    save_zip('FINAL')
-    print('ARCHIVE:',ZIP_PATH)
+def locate(name):
+    hits = list(INPUT.rglob(name)) if INPUT.is_dir() else []
+    return sorted(hits, key=lambda x: x.stat().st_mtime)[-1] if hits else None
+
+
+base = locate(SOURCE_NAME)
+patch = locate(PATCH_NAME)
+if base:
+    # Always start from the exact uploaded base. An old checkout can contain
+    # scripts that the new ZIP does not, otherwise contaminating the run.
+    if REPO.exists():
+        shutil.rmtree(REPO)
+    overlay(base)
+else:
+    if not REPO.is_dir():
+        run(['git','clone','--depth','1','https://github.com/tydeptrai21042004/pham_thi_yen.git', REPO])
+    print('Using GitHub base. Exact project compatibility will be checked.',flush=True)
+method = REPO/'src/watermarklab/methods/proposal_qh_dwt_hess.py'
+if not method.is_file() or hashlib.sha256(method.read_bytes()).hexdigest() != EXPECTED_PROPOSAL_SHA256:
+    raise RuntimeError('Base proposal differs from the validated user source. Upload the provided SOURCE ZIP instead.')
+if patch:
+    overlay(patch)
+else:
+    raise FileNotFoundError(f'Upload {PATCH_NAME} as Kaggle Input. The exact patch is required.')
+if not (REPO/'src/watermarklab/experiments/neural_4096.py').is_file():
+    raise FileNotFoundError('Missing experimental 4,096-bit comparison source code.')
+
+# Fresh Kaggle sessions need Python deps. No inference via `main.py --phase neural`.
+run([sys.executable,'-m','pip','install','-q','-r',REPO/'requirements.txt'])
+run([sys.executable,'-c','import pywt,cv2,scipy,skimage;print("PyWavelets",pywt.__version__)'])
+
+if STEP in ('neural4096','all'):
+    import torch
+    if not torch.cuda.is_available():
+        raise RuntimeError('GPU is required for practical WAM 4096-bit stress testing; enable GPU in Notebook Settings.')
+    run([sys.executable,'-m','pip','install','-q','trustmark'])
+    wam = WORK / 'watermark-anything'
+    if not wam.is_dir():
+        run(['git','clone','--depth','1','https://github.com/facebookresearch/watermark-anything.git',wam])
+    run([sys.executable,'-m','pip','install','-q','--prefer-binary',
+        'omegaconf==2.3.0','einops==0.8.0','timm==1.0.11',
+        'lpips==0.1.4','pycocotools>=2.0.8'])
+    checkpoint = wam/'checkpoints'/'wam_mit.pth'
+    if not checkpoint.is_file() or checkpoint.stat().st_size < 1_000_000:
+        checkpoint.parent.mkdir(parents=True,exist_ok=True)
+        temp=checkpoint.with_suffix('.pth.partial')
+        if temp.exists(): temp.unlink()
+        try:
+            urllib.request.urlretrieve('https://dl.fbaipublicfiles.com/watermark_anything/wam_mit.pth',temp)
+            if temp.stat().st_size < 1_000_000:
+                raise RuntimeError('Downloaded WAM checkpoint is suspiciously small')
+            temp.replace(checkpoint)
+        finally:
+            if temp.exists(): temp.unlink()
+    if not (wam/'checkpoints'/'params.json').is_file() or checkpoint.stat().st_size < 1_000_000:
+        raise RuntimeError('Official WAM config/checkpoint missing or empty.')
+    os.environ['WAM_REPO_DIR'] = str(wam)
+    os.environ['WAM_CHECKPOINT'] = str(checkpoint)
+
+sources = list(INPUT.rglob(RESULT_NAME)) if INPUT.is_dir() else []
+source = Path(RESUME_ZIP) if RESUME_ZIP else (
+    max(sources, key=lambda x: x.stat().st_mtime) if sources else None)
+if source:
+    print('Restoring previous results and neural checkpoints:',source,flush=True)
+else:
+    print('No existing results ZIP found: starting from scratch.',flush=True)
+cmd = [sys.executable,'scripts/recover_missing_results.py',
+       '--step',STEP,'--out',OUTPUT,'--max-jobs',str(MAX_JOBS_PER_RUN),
+       '--max-seconds',str(MAX_SECONDS_PER_RUN),
+       '--task-timeout',str(TASK_TIMEOUT_SECONDS),
+       '--checkpoint-seconds',str(CHECKPOINT_SECONDS)]
+if source:
+    cmd += ['--restore-zip',source]
+code=run(cmd,cwd=REPO,required=False)
+status=OUTPUT/'recovery_status.json'
+if status.is_file():
+    obj=json.loads(status.read_text())
+    print('STATUS:', json.dumps({k:obj.get(k) for k in
+       ('last_requested_steps','last_finished_jobs','blockers','paused_by_budget','classical_final_exists')},indent=2))
+print('Runner exit code:',code)
+print('RESULTS ZIP:',WORK/RESULT_NAME)
+if code:
+    print('Some jobs remain incomplete or failed. See recovery_status.json and per-host logs.',flush=True)
+print('Check completeness.json: complete experiments require every stage, not only an exit code.')

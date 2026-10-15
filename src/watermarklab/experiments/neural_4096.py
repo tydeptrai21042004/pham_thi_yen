@@ -258,43 +258,109 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
                 "resize_to":wrapper.resize_to,"attacks":[c.name for c in cases],
                 "device":device,"model_type":model_type,"force_full":force_full,
                 "save_images":save_images,
+                "implementation_sha256":hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                "native_adapter_sha256":hashlib.sha256(Path(__file__).with_name('neural_baselines.py').read_bytes()).hexdigest(),
                 "clean_gate":{"max_ber":max_clean_ber,"min_coverage":min_clean_coverage}}
-            # Never resume results from an unrelated watermark/configuration.
-            if per_host.exists() and sidecar.exists() and json.loads(sidecar.read_text())==run_contract:
-                with per_host.open(newline='',encoding='utf-8') as f:
-                    previous=list(csv.DictReader(f))
-                full_expected = 2 + len(cases)
-                skip_expected = 2
-                if len(previous) in (full_expected, skip_expected) and all(p.get('phase') for p in previous):
-                    if len(previous) == full_expected or (len(previous)==skip_expected and not force_full and previous[0].get('clean_gate_passed') in ('False','0')):
-                        all_rows.extend(previous)
-                        continue
+            # A cached, exact encoded image is necessary for meaningful resume.
+            # Re-embedding can be nondeterministic: an old CSV plus a freshly
+            # encoded image would silently mix measurements from different hosts.
+            cache = output / method / (host_path.stem + '_marked_cache.png')
+            previous: list[dict] = []
+            cache_ok = False
+            saved_contract = {}
+            if sidecar.is_file():
+                try:
+                    saved_contract = json.loads(sidecar.read_text(encoding='utf-8'))
+                    expected_sha = saved_contract.get('marked_sha256')
+                    cache_ok = (cache.is_file() and bool(expected_sha) and
+                                hashlib.sha256(cache.read_bytes()).hexdigest() == expected_sha and
+                                all(saved_contract.get(k) == v for k,v in run_contract.items()))
+                except (ValueError, OSError):
+                    cache_ok = False
+            if cache_ok and per_host.is_file():
+                try:
+                    with per_host.open(newline='',encoding='utf-8') as f:
+                        previous = list(csv.DictReader(f))
+                    expected_attacks = {case.name for case in cases}
+                    have_attacks = [r.get('attack') for r in previous if r.get('phase')=='after_attack']
+                    header_ok = (len(previous)>=2 and previous[0].get('phase')=='before_attack'
+                                 and previous[1].get('phase')=='control'
+                                 and all(r.get('image')==host_path.stem for r in previous))
+                    previous_ok = (header_ok and len(have_attacks)==len(set(have_attacks))
+                                   and set(have_attacks).issubset(expected_attacks)
+                                   and all(r.get('source_payload_bits')=='4096' for r in previous)
+                                   and all(r.get('method_id')==wrapper.name for r in previous)
+                                   and all(r.get('watermark')==Path(watermark).name for r in previous)
+                                   and all(r.get('bit_coverage') and r.get('psnr')
+                                           for r in previous[:2]))
+                    if not previous_ok:
+                        previous=[]
+                    else:
+                        # Retry execution exceptions that have NO valid metrics.
+                        # Genuine undetected chunks DO retain a numeric coverage.
+                        previous=[r for r in previous if not (
+                            r.get('phase')=='after_attack' and
+                            (not r.get('bit_coverage') or not r.get('psnr')))]
+                        have_attacks=[r.get('attack') for r in previous
+                                      if r.get('phase')=='after_attack']
+                        if (len(have_attacks)==len(cases) or
+                            (not force_full and len(previous)==2 and
+                             previous[0].get('clean_gate_passed') in ('False','0'))):
+                            all_rows.extend(previous)
+                            continue
+                        print(f'[NEURAL-4096 RESUME] {method} {host_path.name}: '
+                              f'{len(have_attacks)}/{len(cases)} attacks from cached embedding',flush=True)
+                except (ValueError,OSError,csv.Error):
+                    previous=[]
             host = load_rgb(host_path,None)
             if host.shape != HOST_SHAPE:
                 raise ValueError(f'{host_path.name}: host must be exactly 512x512 RGB without resizing')
             t0=time.perf_counter()
-            try:
-                marked=wrapper.embed(host,truth)
-            except Exception as exc:
-                # A pretrained model may reject tiny, upsampled regions.
-                # Preserve the failure explicitly; never synthesize a watermark.
-                failure={"method_id":wrapper.name,"image":host_path.stem,
-                         "watermark":Path(watermark).name,"phase":"embedding_failed",
-                         "attack":"no_attack","source_payload_bits":DATA_BITS,
-                         "native_chunk_capacity_bits":wrapper.capacity,
-                         "encoded_chunk_slots":wrapper.chunk_count*wrapper.capacity,
-                         "embedding_time_sec":time.perf_counter()-t0,
-                         "error":f"{type(exc).__name__}: {exc}"}
-                _save_csv(per_host,[failure]);all_rows.append(failure)
-                sidecar.write_text(json.dumps(run_contract,indent=2))
-                _save_csv(output/'per_image_attack_results.csv',all_rows)
-                continue
-            embed_sec=time.perf_counter()-t0
+            if cache_ok:
+                with Image.open(cache) as im:
+                    marked=np.asarray(im.convert('RGB'), dtype=np.uint8)
+                embed_sec = float(previous[0].get('embedding_time_sec') or 0) if previous else 0.0
+            else:
+                # If the previous checkpoint was created by an older version
+                # without this cache, discard ALL old measurements for this host.
+                # This is required for reproducibility, even if re-embedding costs time.
+                try:
+                    marked=wrapper.embed(host,truth)
+                except Exception as exc:
+                    failure={"method_id":wrapper.name,"image":host_path.stem,
+                             "watermark":Path(watermark).name,"phase":"embedding_failed",
+                             "attack":"no_attack","source_payload_bits":DATA_BITS,
+                             "native_chunk_capacity_bits":wrapper.capacity,
+                             "encoded_chunk_slots":wrapper.chunk_count*wrapper.capacity,
+                             "embedding_time_sec":time.perf_counter()-t0,
+                             "error":f"{type(exc).__name__}: {exc}"}
+                    _save_csv(per_host,[failure]);all_rows.append(failure)
+                    _save_csv(output/'per_image_attack_results.csv',all_rows)
+                    continue
+                embed_sec=time.perf_counter()-t0
+                cache.parent.mkdir(parents=True,exist_ok=True)
+                cache_tmp=cache.with_name(cache.name+'.tmp')
+                Image.fromarray(marked).save(cache_tmp,format='PNG')
+                cache_tmp.replace(cache)
+                previous=[]
+                cache_ok=True
+            run_contract = {**run_contract, 'marked_sha256':hashlib.sha256(cache.read_bytes()).hexdigest()}
+            # Save provenance immediately, even if the clean decoder is interrupted.
+            side_tmp=sidecar.with_suffix('.json.tmp')
+            side_tmp.write_text(json.dumps(run_contract, indent=2),encoding='utf-8')
+            side_tmp.replace(sidecar)
             if save_images:
                 dest=output / method / 'marked_images'
                 dest.mkdir(parents=True,exist_ok=True)
                 Image.fromarray(marked).save(dest/(host_path.stem+'.png'))
-            rows=[]
+            rows=list(previous)
+            def save_progress():
+                _save_csv(per_host,rows)
+                side_tmp=sidecar.with_suffix('.json.tmp')
+                side_tmp.write_text(json.dumps(run_contract,indent=2))
+                side_tmp.replace(sidecar)
+                _save_csv(output/'per_image_attack_results.csv',all_rows+rows)
+
             def evaluate(image:np.ndarray, phase:str, attack_name:str, group:str) -> tuple[dict,Recovered]:
                 tic=time.perf_counter()
                 rec=wrapper.detect(image)
@@ -309,14 +375,22 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
                         "side_info_bytes":wrapper.layout_bytes, **metrics}
                 rows.append(record)
                 return record,rec
-            clean,_=evaluate(marked,'before_attack','no_attack','clean')
-            gate=bool(clean['bit_coverage']>=min_clean_coverage and clean['ber_erasure_as_error']<=max_clean_ber)
-            clean['clean_gate_passed']=gate
-            # Negative control: never include in attack averages.
-            control,_=evaluate(host,'control','original_unmarked','control')
-            control['clean_gate_passed']=gate
+            if previous:
+                clean=rows[0]
+                gate=str(clean.get('clean_gate_passed')).lower() in ('true','1')
+            else:
+                clean,_=evaluate(marked,'before_attack','no_attack','clean')
+                gate=bool(clean['bit_coverage']>=min_clean_coverage and clean['ber_erasure_as_error']<=max_clean_ber)
+                clean['clean_gate_passed']=gate
+                # Negative control: never include in attack averages.
+                control,_=evaluate(host,'control','original_unmarked','control')
+                control['clean_gate_passed']=gate
+                save_progress()
             if gate or force_full:
+                already={r.get('attack') for r in rows if r.get('phase')=='after_attack'}
                 for case in cases:
+                    if case.name in already:
+                        continue
                     try:
                         attacked = apply_attack(marked,case)
                         record,_=evaluate(attacked,'after_attack',case.name,case.group)
@@ -327,11 +401,11 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
                                      "attack":case.name,"attack_group":case.group,
                                      "source_payload_bits":DATA_BITS,"clean_gate_passed":gate,
                                      "error":f"attack/decoder error: {type(exc).__name__}: {exc}"})
-            _save_csv(per_host,rows)
-            sidecar.write_text(json.dumps(run_contract,indent=2))
+                    save_progress()  # at most one attack is lost on interruption
+            save_progress()
             all_rows.extend(rows)
-            print(f'[NEURAL-4096] {method} {host_path.name}: clean coverage={clean["bit_coverage"]:.3f} '
-                  f'BER-with-erasures={clean["ber_erasure_as_error"]:.3f}, '
+            print(f'[NEURAL-4096] {method} {host_path.name}: clean coverage={float(clean["bit_coverage"]):.3f} '
+                  f'BER-with-erasures={float(clean["ber_erasure_as_error"]):.3f}, '
                   f'gate={gate}, attack_cases={len(rows)-2}',flush=True)
             _save_csv(output/'per_image_attack_results.csv',all_rows)
             (output/'manifest.json').write_text(json.dumps(manifest,indent=2),encoding='utf-8')
@@ -342,12 +416,12 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
     for (name,phase), grp in df[df.phase.isin(('before_attack','after_attack'))].groupby(['method_id','phase']):
         row={'method_id':name,'phase':phase,'n':len(grp),
              'failure_aware_protocol':'zero_fill_NC_and_erasure_as_error_BER_are_diagnostic_scores'}
-        for k in ('psnr','ssim','nc','ber','nc_zero_fill','ber_erasure_as_error','bit_coverage',
+        for k in ('psnr','ssim','nc','ncc','ber','nc_zero_fill','ncc_zero_fill','ber_erasure_as_error','bit_coverage',
                   'exact_recovery','decoded_chunks','embedding_time_sec','extraction_time_sec'):
             row[k+'_mean']=float(pd.to_numeric(grp[k],errors='coerce').mean())
         summaries.append(row)
     summary_columns=['method_id','phase','n','failure_aware_protocol'] + [
-        k+'_mean' for k in ('psnr','ssim','nc','ber','nc_zero_fill','ber_erasure_as_error',
+        k+'_mean' for k in ('psnr','ssim','nc','ncc','ber','nc_zero_fill','ncc_zero_fill','ber_erasure_as_error',
                            'bit_coverage','exact_recovery','decoded_chunks',
                            'embedding_time_sec','extraction_time_sec')]
     # Keep a readable CSV schema even if every embed fails and no summary row exists.
@@ -356,8 +430,16 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
                   (x.get('phase')=='after_attack' and x.get('error'))]
     clean_rejected=[x for x in all_rows if x.get('phase')=='before_attack' and
                     str(x.get('clean_gate_passed')) in ('False','0')]
-    manifest['status']=('complete_with_failures' if failed_cases else
-                       'capacity_not_validated' if clean_rejected else 'complete')
+    all_attacks = [(str(x.get('method_id')),str(x.get('image')),str(x.get('attack')))
+                   for x in all_rows if x.get('phase')=='after_attack']
+    complete_grid = (len(all_attacks) == len(methods)*len(hosts)*len(cases) and
+                     len(set(all_attacks)) == len(all_attacks) and
+                     not any(x.get('phase')=='embedding_failed' for x in all_rows))
+    # Keep the established scientific status labels. Machine-verifiable
+    # completeness is an independent field: status alone is never sufficient.
+    manifest['status'] = ('complete_with_failures' if failed_cases else
+                          'capacity_not_validated' if clean_rejected else 'complete')
+    manifest['complete_grid'] = complete_grid
     manifest['failure_cases']=len(failed_cases)
     manifest['clean_gate_rejected_hosts']=len(clean_rejected)
     manifest['expected_attacked_rows']=len(methods)*len(hosts)*len(cases)
