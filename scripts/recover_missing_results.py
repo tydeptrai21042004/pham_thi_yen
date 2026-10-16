@@ -18,6 +18,7 @@ import hashlib
 import json
 import math
 import os
+import platform
 import signal
 import shutil
 import subprocess
@@ -71,7 +72,7 @@ def restore(src: Path, out: Path):
                 raise ValueError(f'Unexpected archive path: {member.filename}')
             rel = Path(*parts[1:])
             if any(k in rel.parts for k in ('native_neural', 'neural_4096')):
-                continue  # old non-capacity-matched results are never rerun or repackaged
+                continue  # the old native and non-forced neural evidence is not reusable
             if rel.is_absolute() or rel.parts[0] == '.':
                 raise ValueError(f'Unsafe archive path: {rel}')
             dest = out / rel
@@ -114,9 +115,11 @@ def phase_ok(csv_path: Path, method: str, image: str, attack_names: list[str]) -
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('--step', choices=('optimize','heldout','reviewer','neural4096','extras','all','secondary'), required=True)
+    ap.add_argument('--step', choices=('optimize','heldout','reviewer','reports','neural4096','extras','all','secondary','verify'), required=True)
     ap.add_argument('--watermark', type=Path, help='Watermark for this separate cohort, default: wm.png')
     ap.add_argument('--skip-secondary', action='store_true', help='Internal: prevent a recursive second cohort')
+    ap.add_argument('--include-neural4096', action='store_true', help='Explicit opt-in: extended 4096-bit neural baselines; NEVER native 61-/32-bit tests')
+    ap.add_argument('--extended-sensitivity', action='store_true', help='Use all 12 test images for size sweep and all 9 training images for sensitivity sweep')
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--restore-zip', type=Path)
     ap.add_argument('--max-jobs', type=int, default=16, help='Maximum NEW individual jobs in this run (0 = unlimited)')
@@ -133,6 +136,34 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=True)
     if args.restore_zip:
         restore(args.restore_zip, out)
+
+    # Reproducible measured-runtime metadata for Reviewer 1 (platform only;
+    # execution times remain the real measured benchmark column values).
+    def hardware_environment():
+        cpu_model=platform.processor() or 'not-reported'
+        ram_kib=None
+        if Path('/proc/cpuinfo').is_file():
+            for line in Path('/proc/cpuinfo').read_text(errors='replace').splitlines():
+                if line.lower().startswith('model name'):
+                    cpu_model=line.partition(':')[2].strip()
+                    break
+        if Path('/proc/meminfo').is_file():
+            for line in Path('/proc/meminfo').read_text(errors='replace').splitlines():
+                if line.startswith('MemTotal:'):
+                    ram_kib=int(line.split()[1]);break
+        versions={}
+        from importlib import metadata
+        for package in ('numpy','scipy','pandas','scikit-image','opencv-python',
+                        'PyWavelets','Pillow'):
+            try:versions[package]=metadata.version(package)
+            except metadata.PackageNotFoundError:versions[package]='missing'
+        return {'platform':platform.platform(),'python':sys.version.split()[0],
+                'cpu_model':cpu_model,'logical_cpu_count':os.cpu_count(),
+                'reported_memory_kib':ram_kib,
+                'versions':versions,'thread_env':{name:os.getenv(name) for name in
+                   ('OPENBLAS_NUM_THREADS','MKL_NUM_THREADS','OMP_NUM_THREADS')},
+                'execution_mode':'classical_cpu_benchmark_unless_explicit_neural4096'}
+    jwrite(out/'hardware_environment.json',hardware_environment())
 
     env = os.environ.copy()
     env.update(PYTHONPATH=str(SRC), PYTHONUNBUFFERED='1', OPENBLAS_NUM_THREADS='1',
@@ -291,11 +322,18 @@ def main(argv=None):
                     'attacks':attacks}
                 digest=hashlib.sha256(json.dumps(signature,sort_keys=True).encode()).hexdigest()
                 guard=folder/'run_contract.json'
-                def valid(target=target,guard=guard,digest=digest,method=method,host=host):
-                    try:
-                        return json.loads(guard.read_text()).get('digest')==digest and phase_ok(target,method,host.stem,attacks)
-                    except (FileNotFoundError, ValueError):
-                        return False
+                # Bind a separate validator for each method/host. A closure over
+                # the loop variable would otherwise validate only the LAST job
+                # during the aggregate phase, even if earlier batches were bad.
+                def make_validator(target, guard, digest, method, host_stem, attack_names):
+                    def is_valid():
+                        try:
+                            return (json.loads(guard.read_text()).get('digest') == digest
+                                    and phase_ok(target, method, host_stem, attack_names))
+                        except (FileNotFoundError, ValueError, OSError):
+                            return False
+                    return is_valid
+                valid=make_validator(target,guard,digest,method,host.stem,attacks)
                 if not valid():
                     folder.mkdir(parents=True,exist_ok=True)
                     # Do not certify old outputs under a new parameter/code digest.
@@ -461,6 +499,40 @@ def main(argv=None):
             '--results-dir',classical,'--output',classical/'reviewer_tables'],cwd=ROOT,env=env,check=True)
         return True
 
+    def reports():
+        # Numerical reviewer tables are derived ONLY from validated raw experiments;
+        # no baseline rerun and no changed proposal equations are involved.
+        destination=classical/'reviewer_analysis'
+        state=destination/'review_coverage.json'
+        fingerprint={'watermark':sha(WATERMARK),
+                     'script':sha(ROOT/'scripts/build_review_tables.py'),
+                     'heldout':sha(classical/'heldout_full/per_image_attack_results.csv') if
+                         (classical/'heldout_full/per_image_attack_results.csv').is_file() else None,
+                     'reviewer_inputs':{name:sha(classical/rel) if (classical/rel).is_file() else None
+                         for name,rel in (('security','review_audit/per_case_results.csv'),
+                                          ('bss','bss_validation/bss_per_host_attack.csv'),
+                                          ('channel','channel_ablation/channel_ablation.csv'),
+                                          ('blocks','block_size_comparison/per_case.csv'))},
+                     'ablation':{v:sha(classical/'ablation'/v/'per_image_attack_results.csv')
+                          for v in PROPOSAL_ABLATION_VARIANTS if
+                          (classical/'ablation'/v/'per_image_attack_results.csv').is_file()}}
+        digest=hashlib.sha256(json.dumps(fingerprint,sort_keys=True).encode()).hexdigest()
+        guard=destination/'run_contract.json'
+        def valid():
+            try:
+                return (json.loads(state.read_text()).get('complete') is True
+                        and json.loads(guard.read_text()).get('digest')==digest)
+            except (OSError,ValueError,TypeError):
+                return False
+        if valid():return True
+        cmd=[sys.executable,'scripts/build_review_tables.py',
+             '--results-dir',classical,'--out',destination,
+             '--watermark',WATERMARK.name]
+        ok=record('reports/reviewer_tables',cmd,
+                  validate=lambda:state.is_file() and json.loads(state.read_text()).get('complete') is True)
+        if ok:jwrite(guard,{'digest':digest,'inputs':fingerprint})
+        return valid()
+
     def neural4096():
         # Intentionally ONLY the original 64x64/4096-bit watermark extension.
         # No main.py --phase neural or native/random 61-/32-bit experiments.
@@ -558,11 +630,11 @@ def main(argv=None):
             return False
         tasks = [
           ('size_sweep',[sys.executable,'main.py','--phase','proposal-size-sweep',
-             '--host-dir',test,'--max-images','2','--watermark',WATERMARK,
+             '--host-dir',test,'--max-images',str(12 if args.extended_sensitivity else 2),'--watermark',WATERMARK,
              '--attack-preset','lite','--no-save-images','--output',classical/'size_sweep']),
           ('hparam_sweep',[sys.executable,'main.py','--phase','proposal-hparam-sweep',
              '--host-dir',train,'--watermark',WATERMARK,'--attack-preset','lite',
-             '--max-images','1','--no-save-images','--proposal-repeat','1',
+             '--max-images',str(9 if args.extended_sensitivity else 1),'--no-save-images','--proposal-repeat','1',
              '--hparam-sweep-max-combinations','24','--output',classical/'hparam_sweep']),
           ('proposal_figures',[sys.executable,'main.py','--phase','proposal-plot',
              '--host-dir',test,'--watermark',WATERMARK,'--proposal-param-file',param,
@@ -572,7 +644,8 @@ def main(argv=None):
         for name,cmd in tasks:
             target=classical/name if name!='proposal_figures' else out/'proposal_figures'
             marker=target/'run_complete.json'
-            signature=sha(param)+'/'+sha(WATERMARK)+'/'+name
+            signature=(sha(param)+'/'+sha(WATERMARK)+'/'+name+'/'
+                       + ('extended' if args.extended_sensitivity else 'standard'))
             def valid():
                 try:
                     return marker.is_file() and json.loads(marker.read_text())['signature']==signature
@@ -605,12 +678,19 @@ def main(argv=None):
             else:return False
         return gallery_ok()
 
-    methods={'optimize':optimize,'heldout':heldout,'reviewer':reviewer,'neural4096':neural4096,'extras':extras}
-    steps=['optimize','heldout','reviewer','extras','neural4096'] if args.step=='all' else (
-        [] if args.step=='secondary' else [args.step])
+    methods={'optimize':optimize,'heldout':heldout,'reviewer':reviewer,'reports':reports,'neural4096':neural4096,'extras':extras}
+    # Classical reviewer experiments are the default. Neural comparisons only
+    # execute with an explicit neural4096 step or --include-neural4096.
+    steps=(['optimize','heldout','reviewer','reports','extras'] +
+           (['neural4096'] if args.include_neural4096 else [])) if args.step=='all' else (
+        [] if args.step in ('secondary','verify') else [args.step])
     execution_ok=True
     secondary_path=out/'watermark_2_Cc'
     secondary_archive=out/'watermark_2_Cc.zip'
+    # A fresh `verify` session must inspect the saved secondary ZIP, rather
+    # than incorrectly interpreting an unexpanded independent cohort as absent.
+    if args.step=='verify' and secondary_archive.is_file() and not (secondary_path/'completeness.json').is_file():
+        restore(secondary_archive,secondary_path)
     def secondary_ok():
         try:
             state=json.loads((secondary_path/'completeness.json').read_text())
@@ -638,16 +718,24 @@ def main(argv=None):
             if secondary_archive.is_file() and not (secondary_path/'recovery_status.json').is_file():
                 restore(secondary_archive,secondary_path)
             if not secondary_ok():
-                remaining=0 if not args.max_jobs else max(1,args.max_jobs-new_jobs)
-                command=[sys.executable,__file__,'--step','all','--skip-secondary',
-                    '--watermark',second,'--out',secondary_path,
-                    '--max-jobs',str(remaining),'--max-seconds',str(args.max_seconds),
-                    '--task-timeout',str(args.task_timeout),
-                    '--checkpoint-seconds',str(args.checkpoint_seconds)]
-                if not record('secondary/full_independent_evaluation',command,
-                              validate=secondary_ok,timeout=args.task_timeout):
+                remaining=0 if not args.max_jobs else args.max_jobs-new_jobs
+                if args.max_jobs and remaining<=0:
+                    stop=True
                     execution_ok=False
-                    blockers.append('Second watermark 4096-bit independent cohort not complete')
+                    blockers.append('Second watermark awaiting next session: job budget exhausted')
+                else:
+                    remaining_seconds=max(0,int(args.max_seconds-(time.monotonic()-begin)))
+                    command=[sys.executable,__file__,'--step','all','--skip-secondary',
+                        '--watermark',second,'--out',secondary_path,
+                        '--max-jobs',str(remaining),'--max-seconds',str(remaining_seconds),
+                        '--task-timeout',str(args.task_timeout),
+                        '--checkpoint-seconds',str(args.checkpoint_seconds)]
+                    if args.include_neural4096:command.append('--include-neural4096')
+                    if args.extended_sensitivity:command.append('--extended-sensitivity')
+                    if not record('secondary/full_independent_evaluation',command,
+                                  validate=secondary_ok,timeout=max(60,remaining_seconds)):
+                        execution_ok=False
+                        blockers.append('Second watermark independent cohort not complete')
     finally:
         status['last_requested_steps']=steps
         status['last_finished_jobs']=new_jobs
@@ -688,6 +776,9 @@ def main(argv=None):
                       'ablation/full/per_image_attack_results.csv', 'block_size_comparison/per_case.csv',
                       'channel_ablation/channel_ablation.csv')
         reviewer_ok=all((classical/name).is_file() for name in reviewer_rel)
+        # Every ablation (not just `full`) must be aggregated and complete.
+        reviewer_ok &= all((classical/'ablation'/variant/'per_image_attack_results.csv').is_file()
+                           for variant in PROPOSAL_ABLATION_VARIANTS)
         # Do not trust aggregate CSV existence without validated per-host evidence.
         if reviewer_ok:
             for kind in reviewer_jobs:
@@ -715,6 +806,18 @@ def main(argv=None):
                     if not reviewer_ok:break
                 if not reviewer_ok:break
         if reviewer_ok:
+            # Per-host ablation grids must match the exact reviewer attack suite.
+            expected_reviewer_attacks={a.name for a in default_attack_suite(False,'reviewer_stress')}
+            for variant in PROPOSAL_ABLATION_VARIANTS:
+                ablation_path=classical/'ablation'/variant/'per_image_attack_results.csv'
+                variant_rows=csvrows(ablation_path)
+                exp={(host.stem,'before_attack','no_attack') for host in test.glob('*.bmp')}
+                exp|={(host.stem,'after_attack',name) for host in test.glob('*.bmp')
+                      for name in expected_reviewer_attacks}
+                observed=[(r.get('image'),r.get('phase'),r.get('attack')) for r in variant_rows]
+                reviewer_ok &= len(observed)==len(exp) and set(observed)==exp
+                if not reviewer_ok:break
+        if reviewer_ok:
             for rel in reviewer_rel:
                 rows=csvrows(classical/rel)
                 column='image' if rel.startswith(('ablation/', 'block_size')) else 'host'
@@ -731,7 +834,9 @@ def main(argv=None):
             target=classical/name if name!='proposal_figures' else out/'proposal_figures'
             try:
                 sig=json.loads((target/'run_complete.json').read_text()).get('signature')
-                extras_ok &= (sig==sha(param)+'/'+sha(WATERMARK)+'/'+name)
+                expected_sig=(sha(param)+'/'+sha(WATERMARK)+'/'+name+'/'
+                              + ('extended' if args.extended_sensitivity else 'standard'))
+                extras_ok &= (sig==expected_sig)
             except (OSError,ValueError,KeyError):
                 extras_ok=False
         gallery_host=sorted(test.glob('*.bmp'))[0]
@@ -775,22 +880,41 @@ def main(argv=None):
                     except (OSError,ValueError,KeyError,TypeError):neural_ok=False
                     if not neural_ok:break
                 if not neural_ok:break
+        # Neural evidence is optional for this classical-only review protocol.
+        # A second watermark is an independent cohort, not rows mixed into wm.png.
+        second_requested=args.step in ('all','secondary','verify') and not args.skip_secondary
+        neural_requested=args.include_neural4096 or args.step=='neural4096'
+        report_ok=False
+        try:
+            report_path=classical/'reviewer_analysis/review_coverage.json'
+            report_ok=(json.loads(report_path.read_text()).get('complete') is True
+                       and (classical/'reviewer_analysis/run_contract.json').is_file())
+        except (OSError,ValueError,TypeError):pass
+        classical_core_complete=all((heldout_ok,reviewer_ok,report_ok,extras_ok,gallery_ok_final))
         status['strict_completeness']={
             'classical_13_methods_12_hosts_109_attacks':heldout_ok,
             'reviewer_all_hosts_validated':reviewer_ok,
+            'reviewer_analysis_tables_complete':report_ok,
             'extras_sensitivity_and_figures':extras_ok,
             'neural_4096_both_models_full_grid':neural_ok,
+            'neural_4096_required':neural_requested,
+            'native_neural_61_32bit_executed':False,
             'visual_extracted_gallery_valid':gallery_ok_final,
             'security_and_bss_strictly_validated':reviewer_ok,
-            'secondary_watermark_separate_full_grid':secondary_ok() if (args.step in ('all','secondary') and not args.skip_secondary) else None,
+            'secondary_watermark_separate_full_grid':secondary_ok() if second_requested else None,
+            'secondary_watermark_required':second_requested,
             'expected_heldout_rows':expected_heldout,
             'expected_neural_rows':2*len(info['test_names'])*(2+len(attacks)),
-            'all_core_sections_complete':all((heldout_ok,reviewer_ok,extras_ok,neural_ok,gallery_ok_final))
-                  and (secondary_ok() if (args.step in ('all','secondary') and not args.skip_secondary) else True)}
+            'primary_classical_complete':classical_core_complete,
+            'all_core_sections_complete':classical_core_complete
+               and (neural_ok if neural_requested else True)
+               and (secondary_ok() if second_requested else True)}
         jwrite(out/'completeness.json', status['strict_completeness'])
         jwrite(status_file,status)
         snapshot(out)
     print('Done. Read',status_file,'before claiming full completeness.')
+    if args.step=='verify' and not status['strict_completeness']['all_core_sections_complete']:
+        sys.exit(2)
     if blockers and not stop:
         sys.exit(1)
 
