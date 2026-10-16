@@ -7,11 +7,11 @@ from pathlib import Path
 
 GITHUB = 'https://github.com/tydeptrai21042004/pham_thi_yen.git'
 BRANCH = 'main'
-RUN_4096_EXTENSIONS = False  # optional; True runs BOTH forced-grid 4096-bit neural adaptations
+RUN_4096_EXTENSIONS = True  # run BOTH forced-grid 4096-bit neural adaptations
 RUN_ALL_SENSITIVITY_HOSTS = True  # run full 12-test and 9-train sweep coverage
-FIREFLIES = 4
+FIREFLIES = 1
 GENERATIONS = 2
-SESSION_SECONDS = 31500  # 8h 45m per session; checkpoints are used for long multi-session runs
+SESSION_SECONDS = 31500  # 8h 45m soft budget; checkpoint between long sessions
 JOB_TIMEOUT_SECONDS = 30800
 CHECKPOINT_SECONDS = 600
 
@@ -37,6 +37,7 @@ if REPO.exists():
 run(['git', 'clone', '--depth', '1', '--branch', BRANCH, GITHUB, REPO])
 commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=REPO, text=True).strip()
 print('GitHub commit:', commit, flush=True)
+print('Run configuration: one firefly, two generations, both 4096-bit extensions enabled', flush=True)
 
 proposal = REPO/'src/watermarklab/methods/proposal_qh_dwt_hess.py'
 assert proposal.exists(), 'Missing proposed method'
@@ -49,7 +50,7 @@ runner_text = runner.read_text()
 assert "--proposal-fireflies" in runner_text and "--proposal-generations" in runner_text, (
     'Old recovery runner detected: push the NEW corrected patch before running.')
 assert (REPO/'tests/test_full_reviewer_kaggle_contract_2026.py').is_file(), 'New regression tests not committed'
-assert FIREFLIES == 4 and GENERATIONS == 2
+assert FIREFLIES >= 1 and GENERATIONS >= 1
 
 # Dependency check and preflight regression tests BEFORE time-consuming optimization.
 os.environ.update(PYTHONUNBUFFERED='1', WATERMARKLAB_STRICT_PYWT='1',
@@ -62,7 +63,8 @@ run([sys.executable, '-m', 'pytest', '-q',
      'tests/test_reviewer_experiment_orchestration_2026.py',
      'tests/test_operational_smoke_2026.py',
      'tests/test_dataset_9_train_12_test.py',
-     'tests/test_reviewer_neural_4096.py'], cwd=REPO)
+     'tests/test_reviewer_neural_4096.py',
+     'tests/test_single_firefly_4096_contract_2026.py'], cwd=REPO)
 
 # Optional 4096-bit neural extensions. NEVER call main.py --phase neural.
 # FULL attack grids are forced for both models, keeping genuine decoding failures.

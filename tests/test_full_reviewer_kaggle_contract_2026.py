@@ -131,7 +131,7 @@ def test_original_proposal_byte_integrity():
     assert hashlib.sha256(original.read_bytes()).hexdigest()=='10aaca9b328e14515c20d6684e0b96f8b9a527d3bdbb7acd442c953e8405716d'
 
 
-def test_cli_explicitly_supports_4_fireflies_2_generations_and_neural_opt_in():
+def test_cli_explicitly_supports_1_firefly_2_generations_and_neural_opt_in():
     exe=ROOT/'scripts/recover_missing_results.py'
     result=subprocess.run([sys.executable,str(exe),'--help'],text=True,capture_output=True)
     assert result.returncode==0
@@ -151,8 +151,8 @@ def test_launcher_clones_github_and_never_calls_native_neural():
     text=(ROOT/'KAGGLE_GITHUB_ALL_EXPERIMENTS.py').read_text()
     assert "'git', 'clone'" in text
     assert "'--step', 'all'" in text
-    assert "FIREFLIES = 4" in text and "GENERATIONS = 2" in text
-    assert "RUN_4096_EXTENSIONS = False" in text
+    assert "FIREFLIES = 1" in text and "GENERATIONS = 2" in text
+    assert "RUN_4096_EXTENSIONS = True" in text
     assert "--include-neural4096" in text
     assert "--phase', 'neural'" not in text
     compile(text,'KAGGLE_GITHUB_ALL_EXPERIMENTS.py','exec')
