@@ -47,6 +47,8 @@ def snapshot(out: Path):
             if not file.is_file() or file.suffix == '.tmp':
                 continue
             rel = file.relative_to(out)
+            if rel.parts[0] == 'watermark_2_Cc':
+                continue  # secondary has its own checkpoint ZIP kept at this level
             if any(k in rel.parts for k in ('splits', 'marked_images', 'single_host',
                                             'native_neural', 'neural_4096')):
                 continue
@@ -112,7 +114,9 @@ def phase_ok(csv_path: Path, method: str, image: str, attack_names: list[str]) -
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('--step', choices=('optimize','heldout','reviewer','neural4096','extras','all'), required=True)
+    ap.add_argument('--step', choices=('optimize','heldout','reviewer','neural4096','extras','all','secondary'), required=True)
+    ap.add_argument('--watermark', type=Path, help='Watermark for this separate cohort, default: wm.png')
+    ap.add_argument('--skip-secondary', action='store_true', help='Internal: prevent a recursive second cohort')
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--restore-zip', type=Path)
     ap.add_argument('--max-jobs', type=int, default=16, help='Maximum NEW individual jobs in this run (0 = unlimited)')
@@ -121,6 +125,10 @@ def main(argv=None):
     ap.add_argument('--include-neural', action='store_true', help='Deprecated: all already includes 4096-bit neural; native never runs')
     ap.add_argument('--checkpoint-seconds', type=int, default=600, help='Periodic snapshots during long jobs')
     args = ap.parse_args(argv)
+    global WATERMARK
+    if args.watermark is not None:
+        WATERMARK=args.watermark.resolve()
+    if not WATERMARK.is_file():raise FileNotFoundError(WATERMARK)
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     if args.restore_zip:
@@ -198,6 +206,8 @@ def main(argv=None):
     from watermarklab.methods import DEFAULT_METHOD_IDS
     from watermarklab.benchmark import load_proposal_param_file, OPT_PARAM_FORMAT, PROPOSAL_ABLATION_VARIANTS
     from watermarklab.experiments.splits import build_split, ORIGINAL_TEST_NAMES
+    from watermarklab.experiments.reviewer_checks import (validate_channel,
+        validate_bss, validate_security, validate_gallery)
     import pandas as pd
 
     split = out / 'host_split.json'
@@ -347,7 +357,9 @@ def main(argv=None):
                     cmd=[sys.executable,'-m','watermarklab.experiments.review_audit','--host-dir',sub,
                         '--watermark',WATERMARK,'--param-file',param,'--host-size','512',
                         '--watermark-size','64','--max-images','1','--max-attacks','7',
-                        '--attack-preset','reviewer_stress','--output',directory]
+                        '--attack-preset','reviewer_stress','--wrong-key-trials','8',
+                        '--unrelated-host',next(p for p in sorted(test.glob('*.bmp')) if p.name != host.name),
+                        '--output',directory]
                     required=directory/'per_case_results.csv'
                 elif kind=='bss':
                     cmd=[sys.executable,'-m','watermarklab.experiments.bss_validation','--host-dir',sub,
@@ -362,7 +374,11 @@ def main(argv=None):
                     required=directory/'per_case.csv'
                 guard=directory/'run_contract.json'
                 signature={'kind':kind,'host':sha(host),'watermark':sha(WATERMARK),
-                           'proposal':sha(param),'code':sha(ROOT/'src/watermarklab/methods/proposal_qh_dwt_hess.py')}
+                           'proposal':sha(param),'code':sha(ROOT/'src/watermarklab/methods/proposal_qh_dwt_hess.py'),
+                           'audit_code':sha(ROOT/'src/watermarklab/experiments/review_audit.py') if kind=='audit' else None,
+                           'bss_code':sha(ROOT/'src/watermarklab/experiments/bss_validation.py') if kind=='bss' else None,
+                           'channel_code':sha(ROOT/'src/watermarklab/experiments/channel_ablation.py') if kind=='channel' else None,
+                           'reviewer_checks':sha(ROOT/'src/watermarklab/experiments/reviewer_checks.py')}
                 digest=hashlib.sha256(json.dumps(signature,sort_keys=True).encode()).hexdigest()
                 def output_valid():
                     if not required.is_file():
@@ -381,21 +397,17 @@ def main(argv=None):
                                 if len(vrows)!=len(expected) or {(r.get('phase'),r.get('attack')) for r in vrows}!=expected:
                                     return False
                             return not json.loads((directory/'proposal_ablation_failures.json').read_text())
-                        if kind in ('channel','block'):
-                            state=json.loads((directory/'manifest.json').read_text())
-                            return (state.get('status')==('PASS' if kind=='channel' else 'complete')
-                                    and len(rows)==state.get('expected_rows',-1)
-                                    and all(r.get('host',r.get('image'))==host.name for r in rows))
+                        if kind=='channel':
+                            return validate_channel(directory,host.name)
                         if kind=='audit':
-                            cases={r.get('case') for r in rows}
-                            return ({'marked_clean','original_unmarked','wrong_secret_key'}.issubset(cases)
-                                    and all(not r.get('error') for r in rows)
-                                    and all(r.get('host')==host.name for r in rows))
+                            return validate_security(directory,host.name,wrong_key_trials=8)
                         if kind=='bss':
+                            return validate_bss(directory,host.name,max_attacks=14)
+                        if kind=='block':
                             state=json.loads((directory/'manifest.json').read_text())
-                            return (state.get('n_hosts')==1 and state.get('rows')==len(rows)
-                                    and state.get('hosts')==[host.name]
-                                    and all(r.get('image',r.get('host',host.name)) in (host.name,host.stem) for r in rows))
+                            return (state.get('status')=='complete'
+                                    and len(rows)==state.get('expected_rows',-1)
+                                    and all(r.get('image')==host.name for r in rows))
                         return False
                     except (OSError,ValueError,KeyError,TypeError):
                         return False
@@ -468,6 +480,7 @@ def main(argv=None):
                         expected.update(('after_attack', a) for a in attacks)
                         actual={(r.get('phase'),r.get('attack')) for r in rows}
                         if not (m.get('complete_grid') is True and
+                                m.get('watermark_sha256')==sha(WATERMARK) and
                                 m.get('expected_attacked_rows')==len(attacks) and
                                 m.get('actual_attacked_rows')==len(attacks) and
                                 len(rows)==len(expected) and actual==expected):
@@ -569,15 +582,72 @@ def main(argv=None):
             ok=record(f'extras/{name}',cmd,validate=lambda: target.is_dir() and any(target.rglob('*.csv')) or (name=='proposal_figures' and any(target.rglob('*.pdf'))))
             if ok:jwrite(marker,{'signature':signature})
             elif stop:return False
-        return True
+        # Fixed test host and attack list specified BEFORE results are observed.
+        gallery_host=sorted(test.glob('*.bmp'))[0]
+        gallery=out/'reviewer_visual_gallery'
+        signature={'host':sha(gallery_host),'watermark':sha(WATERMARK),
+                   'proposal':sha(param),'guo':sha(guo),
+                   'code':sha(ROOT/'src/watermarklab/experiments/extracted_gallery.py')}
+        digest=hashlib.sha256(json.dumps(signature,sort_keys=True).encode()).hexdigest()
+        guard=gallery/'run_complete.json'
+        def gallery_ok():
+            try:
+                return (validate_gallery(gallery,gallery_host.name,WATERMARK.name)
+                        and json.loads(guard.read_text()).get('digest')==digest)
+            except (OSError, ValueError):return False
+        if not gallery_ok():
+            cmd=[sys.executable,'-m','watermarklab.experiments.extracted_gallery',
+                 '--host',gallery_host,'--watermark',WATERMARK,'--output',gallery,
+                 '--proposal-params',param,'--guo-params',guo]
+            ok=record('extras/extracted_gallery',cmd,
+                validate=lambda:validate_gallery(gallery,gallery_host.name,WATERMARK.name))
+            if ok:jwrite(guard,{'digest':digest,'signature':signature})
+            else:return False
+        return gallery_ok()
 
     methods={'optimize':optimize,'heldout':heldout,'reviewer':reviewer,'neural4096':neural4096,'extras':extras}
-    steps=['optimize','heldout','reviewer','extras','neural4096'] if args.step=='all' else [args.step]
+    steps=['optimize','heldout','reviewer','extras','neural4096'] if args.step=='all' else (
+        [] if args.step=='secondary' else [args.step])
+    execution_ok=True
+    secondary_path=out/'watermark_2_Cc'
+    secondary_archive=out/'watermark_2_Cc.zip'
+    def secondary_ok():
+        try:
+            state=json.loads((secondary_path/'completeness.json').read_text())
+            prep=json.loads((out/'inputs/secondary_watermark_preprocessing.json').read_text())
+            original=ROOT/'data/watermark/Cc.logo.circle.png'
+            converted=out/'inputs/Cc.logo.circle_alpha_binary.png'
+            return (state.get('all_core_sections_complete') is True and
+                    prep.get('original_sha256')==sha(original) and
+                    prep.get('preprocessed_sha256')==sha(converted))
+        except (OSError,ValueError,KeyError):return False
     try:
         for step in steps:
             ok=methods[step]()
             if stop or not ok:
+                execution_ok=False
                 break
+        if (args.step in ('all','secondary') and not args.skip_secondary
+                and execution_ok and not stop):
+            from watermarklab.experiments.second_watermark import prepare
+            second=prepare(ROOT/'data/watermark/Cc.logo.circle.png',
+                           out/'inputs/Cc.logo.circle_alpha_binary.png')
+            # The separate cohort has its own train optimization, 13-method
+            # held-out grid, reviewer experiments, gallery and neural 4096 runs.
+            # It never reuses wm.png's optimized parameters or mixes CSV rows.
+            if secondary_archive.is_file() and not (secondary_path/'recovery_status.json').is_file():
+                restore(secondary_archive,secondary_path)
+            if not secondary_ok():
+                remaining=0 if not args.max_jobs else max(1,args.max_jobs-new_jobs)
+                command=[sys.executable,__file__,'--step','all','--skip-secondary',
+                    '--watermark',second,'--out',secondary_path,
+                    '--max-jobs',str(remaining),'--max-seconds',str(args.max_seconds),
+                    '--task-timeout',str(args.task_timeout),
+                    '--checkpoint-seconds',str(args.checkpoint_seconds)]
+                if not record('secondary/full_independent_evaluation',command,
+                              validate=secondary_ok,timeout=args.task_timeout):
+                    execution_ok=False
+                    blockers.append('Second watermark 4096-bit independent cohort not complete')
     finally:
         status['last_requested_steps']=steps
         status['last_finished_jobs']=new_jobs
@@ -593,6 +663,27 @@ def main(argv=None):
                        and json.loads(heldout_status.read_text()).get('status')=='PASS')
         except (OSError, ValueError, KeyError):
             pass
+        # Aggregate row counts alone are not proof of original host/params.
+        if heldout_ok:
+            for method in DEFAULT_METHOD_IDS:
+                for host in sorted(test.glob('*.bmp')):
+                    folder=classical/'heldout_batches'/method/host.stem
+                    try:
+                        guard=json.loads((folder/'run_contract.json').read_text())
+                        contract=guard['contract']
+                        digest=hashlib.sha256(json.dumps(contract,sort_keys=True).encode()).hexdigest()
+                        heldout_ok &= (guard['digest']==digest and
+                          contract.get('host')==sha(host) and
+                          contract.get('watermark')==sha(WATERMARK) and
+                          contract.get('proposal')==sha(param) and
+                          contract.get('guo')==sha(guo) and
+                          contract.get('gaata')==sha(gaata) and
+                          contract.get('code')==sha(SRC/'watermarklab/benchmark.py') and
+                          contract.get('method')==method and contract.get('attacks')==attacks and
+                          phase_ok(folder/'per_image_attack_results.csv',method,host.stem,attacks))
+                    except (OSError,ValueError,KeyError):heldout_ok=False
+                    if not heldout_ok:break
+                if not heldout_ok:break
         reviewer_rel=('review_audit/per_case_results.csv', 'bss_validation/bss_per_host_attack.csv',
                       'ablation/full/per_image_attack_results.csv', 'block_size_comparison/per_case.csv',
                       'channel_ablation/channel_ablation.csv')
@@ -609,6 +700,16 @@ def main(argv=None):
                         reviewer_ok &= (g['digest']==hashed and signature['host']==sha(test_host)
                                         and signature['watermark']==sha(WATERMARK)
                                         and signature['proposal']==sha(param))
+                        chunk=classical/'reviewer_chunks'/kind/test_host.stem
+                        reviewer_ok &= (signature.get('kind')==kind and
+                            signature.get('code')==sha(ROOT/'src/watermarklab/methods/proposal_qh_dwt_hess.py') and
+                            signature.get('reviewer_checks')==sha(ROOT/'src/watermarklab/experiments/reviewer_checks.py'))
+                        for specialized,location in (('audit','review_audit'),('bss','bss_validation'),('channel','channel_ablation')):
+                            if kind==specialized:
+                                reviewer_ok &= signature.get(specialized+'_code')==sha(ROOT/f'src/watermarklab/experiments/{location}.py')
+                        if kind=='channel':reviewer_ok &= validate_channel(chunk,test_host.name)
+                        if kind=='audit':reviewer_ok &= validate_security(chunk,test_host.name)
+                        if kind=='bss':reviewer_ok &= validate_bss(chunk,test_host.name)
                     except (OSError, ValueError, KeyError):
                         reviewer_ok=False
                     if not reviewer_ok:break
@@ -633,6 +734,18 @@ def main(argv=None):
                 extras_ok &= (sig==sha(param)+'/'+sha(WATERMARK)+'/'+name)
             except (OSError,ValueError,KeyError):
                 extras_ok=False
+        gallery_host=sorted(test.glob('*.bmp'))[0]
+        gallery_dir=out/'reviewer_visual_gallery'
+        gallery_ok_final=False
+        try:
+            g=json.loads((gallery_dir/'run_complete.json').read_text())
+            gallery_ok_final=(validate_gallery(gallery_dir,gallery_host.name,WATERMARK.name)
+                and g['signature']['host']==sha(gallery_host)
+                and g['signature']['watermark']==sha(WATERMARK)
+                and g['signature']['proposal']==sha(param)
+                and g['signature']['guo']==sha(guo)
+                and g['signature']['code']==sha(ROOT/'src/watermarklab/experiments/extracted_gallery.py'))
+        except (OSError,ValueError,KeyError):pass
         neural_manifest=out/'neural_4096_forced/aggregate_manifest.json'
         neural_ok=False
         try:
@@ -641,14 +754,39 @@ def main(argv=None):
                        and state.get('attack_cases_per_host')==len(attacks))
         except (OSError, ValueError, KeyError):
             pass
+        if neural_ok:
+            for method in ('trustmark','wam'):
+                for host in sorted(test.glob('*.bmp')):
+                    folder=out/'neural_4096_forced'/method/host.stem
+                    try:
+                        manifest=json.loads((folder/'manifest.json').read_text())
+                        rows=csvrows(folder/'per_image_attack_results.csv')
+                        expected={('before_attack','no_attack'),('control','original_unmarked')}
+                        expected.update(('after_attack',a) for a in attacks)
+                        neural_ok &= (manifest.get('complete_grid') is True
+                            and manifest.get('watermark_sha256')==sha(WATERMARK)
+                            and len(rows)==len(expected)
+                            and {(r.get('phase'),r.get('attack')) for r in rows}==expected
+                            and all(r.get('image')==host.stem and r.get('watermark')==WATERMARK.name
+                                 and r.get('source_payload_bits')=='4096' and
+                                 all(math.isfinite(float(r.get(field,''))) for field in
+                                     ('psnr','ssim','bit_coverage','ber_erasure_as_error'))
+                                 for r in rows))
+                    except (OSError,ValueError,KeyError,TypeError):neural_ok=False
+                    if not neural_ok:break
+                if not neural_ok:break
         status['strict_completeness']={
             'classical_13_methods_12_hosts_109_attacks':heldout_ok,
             'reviewer_all_hosts_validated':reviewer_ok,
             'extras_sensitivity_and_figures':extras_ok,
             'neural_4096_both_models_full_grid':neural_ok,
+            'visual_extracted_gallery_valid':gallery_ok_final,
+            'security_and_bss_strictly_validated':reviewer_ok,
+            'secondary_watermark_separate_full_grid':secondary_ok() if (args.step in ('all','secondary') and not args.skip_secondary) else None,
             'expected_heldout_rows':expected_heldout,
             'expected_neural_rows':2*len(info['test_names'])*(2+len(attacks)),
-            'all_core_sections_complete':all((heldout_ok,reviewer_ok,extras_ok,neural_ok))}
+            'all_core_sections_complete':all((heldout_ok,reviewer_ok,extras_ok,neural_ok,gallery_ok_final))
+                  and (secondary_ok() if (args.step in ('all','secondary') and not args.skip_secondary) else True)}
         jwrite(out/'completeness.json', status['strict_completeness'])
         jwrite(status_file,status)
         snapshot(out)

@@ -1,0 +1,16 @@
+{
+  "baseline_commit": "98dd1d4580ca447d9f9267b3d61d74d4baeca24b",
+  "scope": "changed/new files only",
+  "modified_original_method": false,
+  "files": {
+    "scripts/recover_missing_results.py": "7f06096a0f8ae500936a7e59f2ae1220a90c34dbb52033409319d6b3b729a01a",
+    "src/watermarklab/experiments/channel_ablation.py": "470c707a4c839d81d7d97706dd15f9ea608c8d8f6266890a2c97d4f48b586e43",
+    "src/watermarklab/experiments/bss_validation.py": "a2119ccee029b540de6c7e50633cd1ced7fbf075cc322a554a751f2df4acdf8e",
+    "src/watermarklab/experiments/review_audit.py": "d6cdfaa559dfc9ac9be1177218ecb974d1bd77d1c7c1a0cd4b52485e6302b07d",
+    "src/watermarklab/experiments/reviewer_checks.py": "38233314e47930f80fb1b5d46a6f03bff7f33b376a1f908386861b11ea19fb8f",
+    "src/watermarklab/experiments/second_watermark.py": "027b4c851f0efaff92062a86c909a92f160eb2086b5fd63eda275a021e9c26f2",
+    "tests/test_reviewer_completion_extended_2026.py": "19c5d5d0e03cf87f519468a09b9ff3d01d4385bc18fbc81a981cc9f388acbf7b",
+    "REVIEWER_HARDENING_PATCH_20261016.md": "5fdc29343811bb356eac3154ad5a853efdf567fd368a064b465544a2cde782d6"
+  },
+  "result_claim": "source and targeted unit tests only; full Kaggle GPU not executed"
+}

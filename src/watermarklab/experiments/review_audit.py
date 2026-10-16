@@ -12,6 +12,9 @@ import argparse
 import csv
 import copy
 import hashlib
+import hmac
+import secrets
+import math
 import json
 from pathlib import Path
 import platform
@@ -87,11 +90,45 @@ def side_information_sizes(key) -> dict:
     return result
 
 
+def public_extraction_metadata(key) -> dict:
+    """Serializable side information; never place a raw schedule secret in reports."""
+    params=key.params.to_dict().copy()
+    params.pop('private_key',None)
+    return {'flags':list(key.flags), 'hpos_list':list(key.hpos_list),
+            'payload_meta':key.payload_meta,'params_without_secret':params,
+            'repeat_factor':int(key.repeat_factor),'usable_blocks':int(key.usable_blocks),
+            'total_blocks':int(key.total_blocks)}
+
+
+def metadata_tag(key, audit_hmac_key: bytes) -> str:
+    """External integrity-control demonstration only; core extractor has no HMAC."""
+    content=json.dumps(public_extraction_metadata(key),sort_keys=True,
+                       separators=(',', ':'),default=str).encode('utf-8')
+    return hmac.new(audit_hmac_key,content,hashlib.sha256).hexdigest()
+
+
+def keyspace_assumptions_report(secret: str) -> dict:
+    """Distinct entropy models; no misleading SHA-256=256-bit-strength claim."""
+    alphabet=next((n for chars,n in (("0123456789",10),
+                 ("abcdefghijklmnopqrstuvwxyz",26),
+                 ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",62))
+                 if secret and set(secret).issubset(set(chars))), None)
+    return {'configured_secret_characters':len(secret),
+            'illustrative_uniform_alphabet_size':alphabet,
+            'illustrative_max_bits_if_uniform_random':round(len(secret)*math.log2(alphabet),3) if alphabet else None,
+            'sha256_output_bits':256,
+            'effective_security_note':'Hash output length does not imply key entropy. Dictionary attacks may be much cheaper; original KB123 is low entropy.',
+            'recommended_secret':'Use a cryptographically random >=128-bit secret kept out of public source/metadata.',
+            'schedule_hash_algorithm':'SHA-256; not authenticated encryption',
+            'external_metadata_hmac':'Audit tests an external HMAC-SHA256 control; core extractor does NOT enforce it.'}
+
+
 def audit(host_dir: Path, watermark_path: Path, output: Path, *, max_images: int = 2,
           host_size: int | None = 128, watermark_size: int | None = 16,
           repeat: int | None = None, direct_binary: bool = False, contrastive: bool = False,
           attack_preset: str = "lite", max_attacks: int = 4,
-          param_file: Path | None = None, threshold_nc: float = 0.95) -> dict:
+          param_file: Path | None = None, threshold_nc: float = 0.95,
+          unrelated_host_path: Path | None = None, wrong_key_trials: int = 8) -> dict:
     output.mkdir(parents=True, exist_ok=True)
     paths = sorted(p for p in host_dir.iterdir() if p.suffix.lower() in {".bmp", ".png", ".jpg", ".jpeg"})[:max_images]
     if not paths:
@@ -110,7 +147,16 @@ def audit(host_dir: Path, watermark_path: Path, output: Path, *, max_images: int
     params = ProposalParams.from_dict(raw_params)
     truth = prepare_binary_watermark_payload_from_array(watermark, params)[1]
     method = ProposalQHDWTHess(params=params, use_optimizer=False)
+    if wrong_key_trials < 1:raise ValueError('wrong_key_trials must be positive')
     hosts = [load_rgb(p, host_size) for p in paths]
+    independent=load_rgb(unrelated_host_path,host_size) if unrelated_host_path else None
+    if unrelated_host_path and any(unrelated_host_path.resolve()==p.resolve() for p in paths):
+        raise ValueError('The unrelated-host control must use a different host file')
+    if independent is None and len(hosts)==1:
+        # Single-host audit is allowed for local smoke tests, but NOT complete
+        # for the reviewer security protocol.
+        pass
+    audit_hmac_key=secrets.token_bytes(32)
     rows = []
     embeds = []
     attacks = stratified_attack_subset(default_attack_suite(include_none=False, preset=attack_preset),max_attacks)
@@ -126,8 +172,10 @@ def audit(host_dir: Path, watermark_path: Path, output: Path, *, max_images: int
         converted_only = _source_bgr_to_rgb(_embed_space_to_host_bgr(_host_bgr_to_embed_space(conv_bgr)))
         embeds.append((marked,key))
         variants = [("marked_clean", marked), ("original_unmarked", host)]
-        if len(hosts) > 1:
-            variants.append(("unrelated_host", hosts[(i+1)%len(hosts)]))
+        if independent is not None:
+            variants.append(("unrelated_host",independent))
+        elif len(hosts)>1:
+            variants.append(("unrelated_host",hosts[(i+1)%len(hosts)]))
         for att in attacks:
             try:
                 variants.append(("attack:"+att.name, apply_attack(marked, att)))
@@ -138,7 +186,11 @@ def audit(host_dir: Path, watermark_path: Path, output: Path, *, max_images: int
         wrong_key = copy.deepcopy(key)
         wrong_key.params.private_key = key.params.private_key + ":wrong-key-control"
         variants.append(("wrong_secret_key", marked, wrong_key))
-        # Three independent one-character schedule-key changes (not password entropy claims).
+        for trial in range(wrong_key_trials):
+            independent_secret=copy.deepcopy(key)
+            independent_secret.params.private_key=secrets.token_hex(16)
+            variants.append((f'wrong_secret_random_{trial:03d}',marked,independent_secret))
+        # Three deterministic one-character changes support reproducibility.
         for suffix in ("A", "B", "C"):
             perturbed=copy.deepcopy(key)
             perturbed.params.private_key = key.params.private_key + suffix
@@ -156,15 +208,23 @@ def audit(host_dir: Path, watermark_path: Path, output: Path, *, max_images: int
         corrupted_key = copy.deepcopy(key)
         corrupted_key.flags = list(corrupted_key.flags)[:-1]
         variants.append(("corrupted_side_information", marked, corrupted_key))
+        trusted_tag=metadata_tag(key,audit_hmac_key)
         for record in variants:
             case, candidate = record[:2]
             selected_key = record[2] if len(record)==3 else key
             t1 = time.perf_counter()
+            metadata_integrity_valid=hmac.compare_digest(trusted_tag,metadata_tag(selected_key,audit_hmac_key))
+            expected_tampering=case in ('tampered_position_metadata','corrupted_side_information')
+            integrity_fields={'metadata_integrity_valid':metadata_integrity_valid,
+                              'metadata_tampering_detected':expected_tampering and not metadata_integrity_valid,
+                              'metadata_authentication_model':'external_hmac_control_not_core_feature'}
+            # A schedule-secret change is an unauthorized key but does not
+            # modify the public metadata covered by this external HMAC.
             try:
                 diag = method.extract_payload_diagnostics(candidate,selected_key)
                 wm = method.extract(candidate,selected_key)
                 payload = binary_bit_metrics(truth,diag.bits,diag.valid_mask)
-                rows.append({"host":path.name,"case":case,**payload,
+                rows.append({"host":path.name,"case":case,**integrity_fields,**payload,
                              "watermark_ber":ber(watermark,wm),"watermark_nc":nc(watermark,wm),
                              "watermark_centered_ncc":ncc(watermark,wm),
                              "erasures":diag.erasures,"ties":diag.ties,
@@ -180,7 +240,11 @@ def audit(host_dir: Path, watermark_path: Path, output: Path, *, max_images: int
                              "selected_h":sum(x==1 for x in key.flags),
                              "skipped":sum(x==2 for x in key.flags)})
             except Exception as e:
-                rows.append({"host":path.name,"case":case,"error":repr(e)})
+                if expected_tampering or case.startswith('wrong_secret'):
+                    rows.append({'host':path.name,'case':case,**integrity_fields,
+                                 'extraction_rejected':True,'expected_rejection':repr(e)})
+                else:
+                    rows.append({"host":path.name,"case":case,**integrity_fields,"error":repr(e)})
     write_csv(output/"per_case_results.csv",rows)
     component_rows = [dict(host=r['host'], **{k: v for k,v in r.items()
                          if k.endswith('_json_bytes') or k in ('original_watermark_source_bits','embedded_payload_bits')})
@@ -196,9 +260,18 @@ def audit(host_dir: Path, watermark_path: Path, output: Path, *, max_images: int
         "false_positive_rate_at_fixed_threshold":float(np.mean([r["watermark_nc"]>=threshold_nc for r in negatives])) if negatives else None,
         "positive_n":len(positive),"negative_n":len(negatives),
         "warning":"NC with watermark detail side information is not an independently authenticated ownership detector. This threshold is descriptive, not validated/calibrated."}
+    (output/'keyspace_and_threat_model.json').write_text(json.dumps({
+        **keyspace_assumptions_report(params.private_key),
+        'wrong_key_trials_per_host':wrong_key_trials,
+        'unrelated_host_control':bool(independent is not None or len(hosts)>1),
+        'metadata_threats':['flags tampering','coefficient index tampering','side-information truncation'],
+        'hmac_implementation':'external audit-only, not enabled by embedding/extraction'},indent=2))
     (output/"fixed_threshold_diagnostics.json").write_text(json.dumps(detector_diagnostic,indent=2))
     manifest={"schema":"watermarklab-review-audit-v2","optimization":"frozen_global" if param_file else "defaults",
-              "negative_controls":"original, unrelated host, wrong secret key and corrupted side information",
+              "negative_controls":"original, unrelated host, randomized wrong keys, and tampered side information",
+              'wrong_key_trials_per_host':wrong_key_trials,
+              'unrelated_host_control_performed':bool(independent is not None or len(hosts)>1),
+              'metadata_integrity_control':'external HMAC; core scheme does NOT authenticate extraction metadata', 
               "detector_calibrated":False,"hosts":[str(x) for x in paths],"watermark":str(watermark_path),
               "watermark_sha256":hashlib.sha256(watermark.tobytes()).hexdigest(),
               "host_size":host_size,"watermark_size":watermark_size,"direct_binary":direct_binary,
@@ -212,6 +285,9 @@ def audit(host_dir: Path, watermark_path: Path, output: Path, *, max_images: int
     report={"output":str(output),"measurements":len(rows),"errors":len(errors),
             "unwatermarked_original_nc":[r.get("watermark_nc") for r in rows if r.get("case")=="original_unmarked"],
             "fixed_threshold_diagnostic":detector_diagnostic,
+            'random_wrong_key_rows':sum(r['case'].startswith('wrong_secret_random_') for r in rows),
+            'unrelated_host_rows':sum(r['case']=='unrelated_host' for r in rows),
+            'metadata_tampering_detected_all':all(r.get('metadata_tampering_detected') is True for r in rows if r['case'] in ('tampered_position_metadata','corrupted_side_information')),
             "status":"audit_complete_but_detection_not_verified"}
     (output/"summary.json").write_text(json.dumps(report,indent=2),encoding="utf-8")
     return report
@@ -232,12 +308,15 @@ def main():
     ap.add_argument("--max-attacks",type=int,default=4)
     ap.add_argument("--param-file",type=Path,help="Training-only frozen optimized proposal params")
     ap.add_argument("--threshold-nc",type=float,default=0.95,help="Prespecified diagnostic NC threshold, not a learned detector")
+    ap.add_argument('--unrelated-host',type=Path,help='Different test host for independent false-positive control')
+    ap.add_argument('--wrong-key-trials',type=int,default=8)
     args=ap.parse_args()
     print(json.dumps(audit(args.host_dir,args.watermark,args.output,max_images=args.max_images,
                            host_size=args.host_size,watermark_size=args.watermark_size,
                            repeat=args.repeat,direct_binary=args.direct_binary,contrastive=args.contrastive,
                            attack_preset=args.attack_preset,max_attacks=args.max_attacks,
-                           param_file=args.param_file,threshold_nc=args.threshold_nc),indent=2))
+                           param_file=args.param_file,threshold_nc=args.threshold_nc,
+                           unrelated_host_path=args.unrelated_host,wrong_key_trials=args.wrong_key_trials),indent=2))
 
 if __name__ == "__main__":
     main()
