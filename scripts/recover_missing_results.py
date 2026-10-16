@@ -120,14 +120,20 @@ def main(argv=None):
     ap.add_argument('--skip-secondary', action='store_true', help='Internal: prevent a recursive second cohort')
     ap.add_argument('--include-neural4096', action='store_true', help='Explicit opt-in: extended 4096-bit neural baselines; NEVER native 61-/32-bit tests')
     ap.add_argument('--extended-sensitivity', action='store_true', help='Use all 12 test images for size sweep and all 9 training images for sensitivity sweep')
+    ap.add_argument('--proposal-fireflies', type=int, default=4, help='Proposal optimization population, default 4')
+    ap.add_argument('--proposal-generations', type=int, default=2, help='Proposal optimization generations, default 2')
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--restore-zip', type=Path)
     ap.add_argument('--max-jobs', type=int, default=16, help='Maximum NEW individual jobs in this run (0 = unlimited)')
     ap.add_argument('--max-seconds', type=int, default=31500, help='Soft budget: stop after a finished job')
     ap.add_argument('--task-timeout', type=int, default=11000, help='Per-job limit; optimize progress survives timeout')
-    ap.add_argument('--include-neural', action='store_true', help='Deprecated: all already includes 4096-bit neural; native never runs')
+    ap.add_argument('--include-neural', action='store_true', help='Deprecated unsafe/ambiguous name; use --include-neural4096 instead')
     ap.add_argument('--checkpoint-seconds', type=int, default=600, help='Periodic snapshots during long jobs')
     args = ap.parse_args(argv)
+    if args.proposal_fireflies < 1 or args.proposal_generations < 1:
+        ap.error('--proposal-fireflies and --proposal-generations must be positive integers')
+    if args.include_neural:
+        ap.error('Ambiguous --include-neural is disabled. Only --include-neural4096 is supported; native 61/32-bit runs are forbidden.')
     global WATERMARK
     if args.watermark is not None:
         WATERMARK=args.watermark.resolve()
@@ -229,6 +235,11 @@ def main(argv=None):
         jwrite(status_file, status)
         snapshot(out)
         print(('PASS' if success else 'FAILED'), name, reason if not success else '', flush=True)
+        if not success and logfile.exists():
+            # Show actionable traceback/tail, without flooding Kaggle notebook output.
+            tail=logfile.read_text(encoding='utf-8',errors='replace').splitlines()[-18:]
+            print('--- failure log tail: ' + str(logfile) + ' ---', flush=True)
+            print('\n'.join(tail), flush=True)
         if not success:
             blockers.append(name)
         return success
@@ -268,7 +279,13 @@ def main(argv=None):
             state=json.loads(state_file.read_text())
             if p.get('optimization_contract_sha256') != state.get('fingerprint'):return False
             current_files={f.name:sha(f) for f in [*sorted(train.glob('*.bmp')),WATERMARK]}
-            if current_files != state.get('contract',{}).get('files'):return False
+            contract=state.get('contract', {})
+            if current_files != contract.get('files'):return False
+            if (contract.get('n_fireflies')!=args.proposal_fireflies
+                    or contract.get('n_generations')!=args.proposal_generations
+                    or contract.get('attack_preset')!='script'
+                    or contract.get('repeat')!='full'):
+                return False
             if len({e['candidate_source'] for e in p['training_selection']})!=9:
                 return False
             return bool(load_proposal_param_file(param)['global_params'])
@@ -295,8 +312,8 @@ def main(argv=None):
                 return False
         return record('proposal/optimize', [sys.executable,'main.py','--phase','optimize',
             '--methods','proposal','--host-dir',train,'--watermark',WATERMARK,
-            '--proposal-repeat','full','--proposal-optimizer-fireflies','4',
-            '--proposal-optimizer-generations','2','--proposal-optimizer-attack-preset','script',
+            '--proposal-repeat','full','--proposal-optimizer-fireflies',str(args.proposal_fireflies),
+            '--proposal-optimizer-generations',str(args.proposal_generations),'--proposal-optimizer-attack-preset','script',
             '--proposal-param-file',param], validate=prepared)
 
     def one_host(host):
@@ -713,7 +730,7 @@ def main(argv=None):
             second=prepare(ROOT/'data/watermark/Cc.logo.circle.png',
                            out/'inputs/Cc.logo.circle_alpha_binary.png')
             # The separate cohort has its own train optimization, 13-method
-            # held-out grid, reviewer experiments, gallery and neural 4096 runs.
+            # held-out grid, reviewer experiments and gallery; neural 4096 is opt-in.
             # It never reuses wm.png's optimized parameters or mixes CSV rows.
             if secondary_archive.is_file() and not (secondary_path/'recovery_status.json').is_file():
                 restore(secondary_archive,secondary_path)
@@ -726,6 +743,8 @@ def main(argv=None):
                 else:
                     remaining_seconds=max(0,int(args.max_seconds-(time.monotonic()-begin)))
                     command=[sys.executable,__file__,'--step','all','--skip-secondary',
+                        '--proposal-fireflies',str(args.proposal_fireflies),
+                        '--proposal-generations',str(args.proposal_generations),
                         '--watermark',second,'--out',secondary_path,
                         '--max-jobs',str(remaining),'--max-seconds',str(remaining_seconds),
                         '--task-timeout',str(args.task_timeout),
