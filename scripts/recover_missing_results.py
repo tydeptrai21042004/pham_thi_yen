@@ -360,6 +360,7 @@ def main(argv=None):
                          '--baseline-mode','adapt','--host-dir',one_host(host),
                          '--watermark',WATERMARK,'--attack-preset','full',
                          '--proposal-repeat','full',*common_args(),
+                         '--resume-attack-journal',
                          '--no-save-images','--output',folder]
                     ok=record(f'heldout/{method}/{host.stem}',cmd,
                         validate=lambda target=target,method=method,host=host: phase_ok(target,method,host.stem,attacks))
@@ -641,6 +642,51 @@ def main(argv=None):
             'warning':'Clean gate failures and incorrect/missing bits remain genuine failures.'})
         return True
 
+    def extras_output_ok(name, target):
+        """Only certify complete output grids; file existence is insufficient."""
+        try:
+            lite = [a.name for a in default_attack_suite(False, 'lite')]
+            expected_hosts = 12 if args.extended_sensitivity else 2
+            if name == 'size_sweep':
+                clean = csvrows(target/'proposal_size_sweep_clean_results.csv')
+                attacked = csvrows(target/'proposal_size_sweep_attack_results.csv')
+                failures = json.loads((target/'proposal_size_sweep_failures.json').read_text())
+                # Default sweep: 3 host dimensions x 3 payload dimensions.
+                count = expected_hosts * 3 * 3
+                expected_keys = {(h.name, hs, ws) for h in sorted(test.glob('*.bmp'))[:expected_hosts]
+                                 for hs in ('256','512','1024') for ws in ('32','64','128')}
+                actual_keys = {(r['host_image'],r['host_size'],r['watermark_size']) for r in clean}
+                attacked_keys = {(r['host_image'],r['host_size'],r['watermark_size'],r['attack'])
+                                 for r in attacked}
+                return (not failures and len(clean)==count and actual_keys==expected_keys
+                        and len(attacked)==count*len(lite)
+                        and attacked_keys=={(*key,attack) for key in expected_keys for attack in lite}
+                        and all(math.isfinite(float(r[k])) for r in clean
+                                for k in ('clean_psnr','clean_ssim','clean_nc','clean_ber'))
+                        and all(math.isfinite(float(r[k])) for r in attacked
+                                for k in ('nc_after_attack','ber_after_attack','psnr_after_attack')))
+            if name == 'hparam_sweep':
+                rows=csvrows(target/'proposal_hparam_sweep_per_image_attack_results.csv')
+                failures=json.loads((target/'proposal_hparam_sweep_failures.json').read_text())
+                n_hosts=9 if args.extended_sensitivity else 1
+                if failures or len(rows)!=24*n_hosts*(1+len(lite)):
+                    return False
+                keys={(r['sweep_combo_id'],r['image'],r['phase'],r['attack']) for r in rows}
+                combos={r['sweep_combo_id'] for r in rows}
+                hostnames={p.stem for p in sorted(train.glob('*.bmp'))[:n_hosts]}
+                expected={(combo,host,'before_attack','no_attack') for combo in combos for host in hostnames}
+                expected|={(combo,host,'after_attack',a) for combo in combos
+                           for host in hostnames for a in lite}
+                return (len(combos)==24 and len(keys)==len(rows) and keys==expected
+                        and all(math.isfinite(float(r[k])) for r in rows
+                                for k in ('psnr','ssim','nc','ber')))
+            if name == 'proposal_figures':
+                return (any(target.glob('proposal_attack_sensitivity_*.pdf'))
+                        and (target/'proposal_plot_detail_all_watermarks.csv').is_file())
+        except (OSError,ValueError,KeyError,TypeError,OverflowError):
+            return False
+        return False
+
     def extras():
         if not prepared():
             blockers.append('Sensitivity and figures require optimized parameters')
@@ -648,7 +694,9 @@ def main(argv=None):
         tasks = [
           ('size_sweep',[sys.executable,'main.py','--phase','proposal-size-sweep',
              '--host-dir',test,'--max-images',str(12 if args.extended_sensitivity else 2),'--watermark',WATERMARK,
-             '--attack-preset','lite','--no-save-images','--output',classical/'size_sweep']),
+             '--attack-preset','lite','--proposal-param-file',param,
+             '--proposal-param-mode','require','--proposal-repeat','full',
+             '--no-save-images','--output',classical/'size_sweep']),
           ('hparam_sweep',[sys.executable,'main.py','--phase','proposal-hparam-sweep',
              '--host-dir',train,'--watermark',WATERMARK,'--attack-preset','lite',
              '--max-images',str(9 if args.extended_sensitivity else 1),'--no-save-images','--proposal-repeat','1',
@@ -661,15 +709,16 @@ def main(argv=None):
         for name,cmd in tasks:
             target=classical/name if name!='proposal_figures' else out/'proposal_figures'
             marker=target/'run_complete.json'
-            signature=(sha(param)+'/'+sha(WATERMARK)+'/'+name+'/'
+            signature=(sha(param)+'/'+sha(WATERMARK)+'/'+sha(SRC/'watermarklab/benchmark.py')+'/'+name+'/'
                        + ('extended' if args.extended_sensitivity else 'standard'))
             def valid():
                 try:
-                    return marker.is_file() and json.loads(marker.read_text())['signature']==signature
+                    return (marker.is_file() and json.loads(marker.read_text())['signature']==signature
+                            and extras_output_ok(name,target))
                 except (OSError,ValueError,KeyError):
                     return False
             if valid():continue
-            ok=record(f'extras/{name}',cmd,validate=lambda: target.is_dir() and any(target.rglob('*.csv')) or (name=='proposal_figures' and any(target.rglob('*.pdf'))))
+            ok=record(f'extras/{name}',cmd,validate=lambda n=name,t=target: extras_output_ok(n,t))
             if ok:jwrite(marker,{'signature':signature})
             elif stop:return False
         # Fixed test host and attack list specified BEFORE results are observed.
@@ -853,9 +902,9 @@ def main(argv=None):
             target=classical/name if name!='proposal_figures' else out/'proposal_figures'
             try:
                 sig=json.loads((target/'run_complete.json').read_text()).get('signature')
-                expected_sig=(sha(param)+'/'+sha(WATERMARK)+'/'+name+'/'
+                expected_sig=(sha(param)+'/'+sha(WATERMARK)+'/'+sha(SRC/'watermarklab/benchmark.py')+'/'+name+'/'
                               + ('extended' if args.extended_sensitivity else 'standard'))
-                extras_ok &= (sig==expected_sig)
+                extras_ok &= (sig==expected_sig and extras_output_ok(name,target))
             except (OSError,ValueError,KeyError):
                 extras_ok=False
         gallery_host=sorted(test.glob('*.bmp'))[0]

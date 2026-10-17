@@ -23,6 +23,7 @@ from watermarklab.methods.proposal_qh_dwt_hess import ProposalParams, ProposalQH
 from watermarklab.vendor.dwt_hess_fwa.watermark import WatermarkConfig
 from watermarklab.vendor.dwt_hess_fwa.fwa import optimize_key_params
 from watermarklab.paper_reported import write_paper_reported
+from watermarklab.experiments.partial_results import AttackCheckpoint, fingerprint, file_hash
 
 
 OPT_PARAM_FORMAT = "watermarklab_proposal_optimization_params_v1"
@@ -346,6 +347,7 @@ def run_benchmark(
     baseline_modes: dict[str, str] | None = None,
     guo_options: dict[str, Any] | None = None,
     gaata_options: dict[str, Any] | None = None,
+    resume_attacks: bool = False,
 ):
     host_dir = Path(host_dir)
     output_dir = Path(output_dir)
@@ -465,6 +467,23 @@ def run_benchmark(
                         key_info["proposal_structured_repetition_enabled"] = bool(getattr(key.params, "structured_repetition_enabled", True))
                         key_info["proposal_candidate_selection_mode"] = str(getattr(key.params, "candidate_selection_mode", "bss_mse"))
 
+                attack_cache = None
+                if resume_attacks:
+                    # Include the source, host, watermark, selected method settings,
+                    # whole attack grid and frozen optimized parameters. The
+                    # reconstructed marked-image hash is checked separately.
+                    attack_cache = AttackCheckpoint(
+                        output_dir / "attack_progress" / method_id / (image_name + ".json"),
+                        fingerprint("normal_v2", file_hash(__file__),
+                                    file_hash(host_path), file_hash(watermark_path),
+                                    method_id, attack_preset, invert_watermark,
+                                    [(a.name, a.group, a.params) for a in attacks],
+                                    proposal_options, guo_options, gaata_options,
+                                    runtime_baseline_modes, key_info),
+                        numeric_columns=("psnr", "ssim", "nc", "ber", "embed_time_sec", "extract_time_sec"),
+                    )
+                    attack_cache.prepare(watermarked)
+
                 if save_outputs:
                     base = output_dir / "images" / method_id / image_name
 
@@ -477,7 +496,7 @@ def run_benchmark(
                     # Watermark extracted from the watermarked image before any attack.
                     save_image(base / "watermark_extracted_before_attack.png", extracted_clean)
 
-                rows.append({
+                clean_row = {
                     "method_id": method_id,
                     "method_name": method.name,
                     "image": image_name,
@@ -491,11 +510,21 @@ def run_benchmark(
                     "embed_time_sec": embed_time,
                     "extract_time_sec": extract_clean_time,
                     **key_info,
-                })
+                }
+                if attack_cache:
+                    # Keep original measured timings from the checkpoint.
+                    clean_row = attack_cache.clean() or clean_row
+                    attack_cache.set_clean(clean_row)
+                rows.append(clean_row)
 
                 for attack in attacks:
                     if attack.name == "no_attack":
                         continue
+                    if attack_cache:
+                        previous = attack_cache.attack(attack.name)
+                        if previous is not None:
+                            rows.append(previous)
+                            continue
                     try:
                         attacked = apply_attack(watermarked, attack)
                         t2 = time.perf_counter()
@@ -509,7 +538,7 @@ def run_benchmark(
 
                             # Watermark extracted after this attack.
                             save_image(attack_base / "watermark_extracted_after_attack.png", extracted)
-                        rows.append({
+                        attack_row = {
                             "method_id": method_id,
                             "method_name": method.name,
                             "image": image_name,
@@ -523,7 +552,10 @@ def run_benchmark(
                             "embed_time_sec": embed_time,
                             "extract_time_sec": extract_time,
                             **key_info,
-                        })
+                        }
+                        rows.append(attack_row)
+                        if attack_cache:
+                            attack_cache.set_attack(attack.name, attack_row)
                     except Exception as e:
                         failures.append({"method_id": method_id, "image": image_name, "attack": attack.name, "error": repr(e)})
             except Exception as e:
@@ -986,6 +1018,7 @@ def run_proposal_hparam_sweep_phase(
             baseline_modes={},
             guo_options={},
             gaata_options={},
+            resume_attacks=True,
         )
 
         metadata = {
@@ -2000,6 +2033,17 @@ def run_proposal_size_sweep_phase(
                         "watermark_size": int(watermark_size),
                         "proposal_param_source": param_source,
                     }
+                    sweep_cache = AttackCheckpoint(
+                        output_dir / "progress" / host_path.stem /
+                        f"host_{host_size}_wm_{watermark_size}_{wm_path.stem}.json",
+                        fingerprint("size_sweep_v2", file_hash(__file__),
+                                    file_hash(host_path), file_hash(wm_path),
+                                    file_hash(Path(__file__).parent / "methods" / "proposal_qh_dwt_hess.py"),
+                                    params.to_dict(), host_size, watermark_size,
+                                    attack_preset, invert_watermark, use_optimizer,
+                                    optimizer_trials, [(a.name, a.params) for a in attacks]),
+                        numeric_columns=("embed_time_sec", "extract_time_sec"),
+                    )
                     try:
                         watermark = _load_resized_binary_watermark(wm_path, watermark_size, invert=invert_watermark)
                         method = ProposalQHDWTHess(params=ProposalParams.from_dict(params.to_dict()), use_optimizer=use_optimizer, optimizer_trials=optimizer_trials)
@@ -2031,6 +2075,12 @@ def run_proposal_size_sweep_phase(
                             "proposal_h_used": h_used,
                             "proposal_skip_used": skip_used,
                         }
+                        sweep_cache.prepare(watermarked)
+                        prior_clean = sweep_cache.clean()
+                        if prior_clean is not None:
+                            clean_row = prior_clean
+                        else:
+                            sweep_cache.set_clean(clean_row)
                         clean_rows.append(clean_row)
 
                         if save_outputs:
@@ -2041,6 +2091,10 @@ def run_proposal_size_sweep_phase(
                             save_image(base / "watermark_extracted_before_attack.png", extracted_clean)
 
                         for attack in attacks:
+                            cached_row = sweep_cache.attack(attack.name)
+                            if cached_row is not None:
+                                attack_rows.append(cached_row)
+                                continue
                             try:
                                 attacked = apply_attack(watermarked, attack)
                                 t2 = time.perf_counter()
@@ -2067,6 +2121,7 @@ def run_proposal_size_sweep_phase(
                                     "proposal_skip_used": skip_used,
                                 }
                                 attack_rows.append(attack_row)
+                                sweep_cache.set_attack(attack.name, attack_row)
                                 if save_outputs:
                                     attack_base = base / "attacks" / attack.name
                                     save_image(attack_base / "host_after_attack.png", attacked)
@@ -2192,8 +2247,14 @@ def run_proposal_size_sweep_phase(
     print(f"Saved proposal size-sweep summary to: {combo_summary_path}")
     if not combo_summary.empty:
         print(combo_summary.to_string(index=False))
-    if failures:
-        print(f"Size-sweep failures: {len(failures)}. See proposal_size_sweep_failures.json")
+    expected_clean = len(host_paths) * len(host_sizes) * len(wm_paths) * len(watermark_sizes)
+    expected_attack = expected_clean * len(attacks)
+    if failures or len(clean_rows) != expected_clean or len(attack_rows) != expected_attack:
+        raise RuntimeError(
+            f"Incomplete size sweep: clean={len(clean_rows)}/{expected_clean}, "
+            f"attacks={len(attack_rows)}/{expected_attack}, failures={len(failures)}. "
+            "Partial attack progress is saved in output/progress."
+        )
 
     return {
         "clean_results": clean_df,
@@ -2257,6 +2318,7 @@ def main():
     parser.add_argument("--gaata-embedding-rule", default="auto", choices=["auto", "decimal", "qim"], help="auto: qim for adapt mode, decimal for original-rerun; decimal: paper-style selected decimal digit; qim: uint8-safe adapted rule.")
     parser.add_argument("--gaata-qim-step", type=float, default=16.0, help="Quantization step for Gaata's uint8-safe adapted QIM rule.")
 
+    parser.add_argument("--resume-attack-journal", action="store_true", help="Persist validated per-attack rows for interruption-safe held-out benchmarks.")
     parser.add_argument("--proposal-param-file", default=DEFAULT_PROPOSAL_PARAM_FILE, help="JSON/CSV file written by optimization phase. Normal phase loads it automatically when it exists.")
     parser.add_argument("--proposal-param-mode", default="auto", choices=["auto", "ignore", "require"], help="auto: use param file if present; ignore: always defaults; require: fail if missing.")
     parser.add_argument("--proposal-use-optimizer", action="store_true", help="Legacy one-pass adaptive mode. For reproducible two-phase use --phase optimize first, then --phase normal.")
@@ -2542,6 +2604,7 @@ def main():
         baseline_modes=baseline_modes,
         guo_options=guo_options,
         gaata_options=gaata_options,
+        resume_attacks=args.resume_attack_journal,
     )
     if not result["results"].empty:
         print(f"Saved per-image results to: {Path(args.output) / 'per_image_attack_results.csv'}")
