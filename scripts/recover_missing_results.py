@@ -113,6 +113,57 @@ def phase_ok(csv_path: Path, method: str, image: str, attack_names: list[str]) -
     return True
 
 
+
+def neural_metrics_valid(row: dict) -> bool:
+    """Allow the mathematically correct +inf PSNR of an unchanged control ONLY.
+
+    A negative-control image is the original host, so its MSE is zero.  Every
+    other reported numeric value must still be finite; missing/NaN/negative
+    infinite metrics (including exceptions written as incomplete CSV rows) fail.
+    """
+    try:
+        psnr_value = float(row.get('psnr', ''))
+        control = row.get('phase') == 'control' and row.get('attack') == 'original_unmarked'
+        if not (math.isfinite(psnr_value) or (control and psnr_value == math.inf)):
+            return False
+        return all(math.isfinite(float(row.get(field, ''))) for field in
+                   ('ssim', 'bit_coverage', 'ber_erasure_as_error'))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def valid_neural_host(target: Path, manifest: Path, *, method: str, host: str,
+                      watermark: str, watermark_sha: str, attacks: list[str]) -> bool:
+    """Validate one complete forced-4096 host before deciding to re-run inference.
+
+    This works on a restored checkpoint, including a previously rejected
+    TrustMark CSV.  No model loading is needed just to revalidate saved rows.
+    """
+    try:
+        m = json.loads(manifest.read_text(encoding='utf-8'))
+        rows = csvrows(target)
+        expected = {('before_attack', 'no_attack'), ('control', 'original_unmarked')}
+        expected.update(('after_attack', name) for name in attacks)
+        keys = [(r.get('phase'), r.get('attack')) for r in rows]
+        if not (m.get('complete_grid') is True and
+                m.get('watermark_sha256') == watermark_sha and
+                m.get('expected_attacked_rows') == len(attacks) and
+                m.get('actual_attacked_rows') == len(attacks) and
+                len(rows) == len(expected) and set(keys) == expected):
+            return False
+        # Check no duplicates and refuse a wrong-cohort or wrong-method CSV.
+        expected_method = method + '_4096_spatial'
+        for r in rows:
+            if (r.get('method_id') != expected_method or r.get('image') != host or
+                r.get('watermark') != watermark or
+                r.get('source_payload_bits') != '4096' or
+                r.get('phase') == 'embedding_failed' or
+                not neural_metrics_valid(r)):
+                return False
+        return True
+    except (OSError, ValueError, TypeError, KeyError, csv.Error):
+        return False
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--step', choices=('optimize','heldout','reviewer','reports','neural4096','extras','all','secondary','verify'), required=True)
@@ -563,33 +614,10 @@ def main(argv=None):
                 target=directory/'per_image_attack_results.csv'
                 manifest=directory/'manifest.json'
                 def valid():
-                    try:
-                        m=json.loads(manifest.read_text())
-                        rows=csvrows(target)
-                        expected={('before_attack','no_attack'),('control','original_unmarked')}
-                        expected.update(('after_attack', a) for a in attacks)
-                        actual={(r.get('phase'),r.get('attack')) for r in rows}
-                        if not (m.get('complete_grid') is True and
-                                m.get('watermark_sha256')==sha(WATERMARK) and
-                                m.get('expected_attacked_rows')==len(attacks) and
-                                m.get('actual_attacked_rows')==len(attacks) and
-                                len(rows)==len(expected) and actual==expected):
-                            return False
-                        if any(str(r.get('source_payload_bits'))!='4096' for r in rows):
-                            return False
-                        if any(r.get('phase')=='embedding_failed' for r in rows):
-                            return False
-                        for row in rows:
-                            if row.get('image')!=host.stem or row.get('watermark')!=WATERMARK.name:
-                                return False
-                            # Missing bits (coverage=0) are scientifically valid;
-                            # missing numeric metrics due to a processing exception are not.
-                            for field in ('psnr','ssim','bit_coverage','ber_erasure_as_error'):
-                                if not math.isfinite(float(row.get(field,''))):
-                                    return False
-                        return True
-                    except (OSError,ValueError,TypeError,KeyError):
-                        return False
+                    return valid_neural_host(
+                        target, manifest, method=method, host=host.stem,
+                        watermark=WATERMARK.name, watermark_sha=sha(WATERMARK),
+                        attacks=attacks)
                 if valid():
                     status['jobs'][f'neural4096/{method}/{host.stem}']='PASS'
                     continue
@@ -931,23 +959,15 @@ def main(argv=None):
             for method in ('trustmark','wam'):
                 for host in sorted(test.glob('*.bmp')):
                     folder=out/'neural_4096_forced'/method/host.stem
-                    try:
-                        manifest=json.loads((folder/'manifest.json').read_text())
-                        rows=csvrows(folder/'per_image_attack_results.csv')
-                        expected={('before_attack','no_attack'),('control','original_unmarked')}
-                        expected.update(('after_attack',a) for a in attacks)
-                        neural_ok &= (manifest.get('complete_grid') is True
-                            and manifest.get('watermark_sha256')==sha(WATERMARK)
-                            and len(rows)==len(expected)
-                            and {(r.get('phase'),r.get('attack')) for r in rows}==expected
-                            and all(r.get('image')==host.stem and r.get('watermark')==WATERMARK.name
-                                 and r.get('source_payload_bits')=='4096' and
-                                 all(math.isfinite(float(r.get(field,''))) for field in
-                                     ('psnr','ssim','bit_coverage','ber_erasure_as_error'))
-                                 for r in rows))
-                    except (OSError,ValueError,KeyError,TypeError):neural_ok=False
-                    if not neural_ok:break
-                if not neural_ok:break
+                    if not valid_neural_host(
+                            folder/'per_image_attack_results.csv', folder/'manifest.json',
+                            method=method, host=host.stem,
+                            watermark=WATERMARK.name, watermark_sha=sha(WATERMARK),
+                            attacks=attacks):
+                        neural_ok=False
+                        break
+                if not neural_ok:
+                    break
         # Neural evidence is optional for this classical-only review protocol.
         # A second watermark is an independent cohort, not rows mixed into wm.png.
         second_requested=args.step in ('all','secondary','verify') and not args.skip_secondary
