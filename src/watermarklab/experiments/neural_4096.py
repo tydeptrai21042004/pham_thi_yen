@@ -48,23 +48,38 @@ RESULT_COLUMNS = [
     "bit_coverage", "decoded_chunks", "total_chunks", "exact_recovery", "clean_gate_passed",
     "embedding_time_sec", "extraction_time_sec", "native_chunk_capacity_bits",
     "source_payload_bits", "encoded_chunk_slots", "side_info_bytes", "error",
+    "erasure_notes", "fraction_correct_all_bits", "nc_full_coverage",
+    "total_correct_bits", "total_wrong_bits", "total_erased_bits",
 ]
 
 
-def watermark_bits(path: Path) -> np.ndarray:
-    """A canonical grayscale binary bitmap; fail on alpha-only/all-zero sources."""
+def watermark_bits(path: Path, *, binary_channel: str = "luma") -> np.ndarray:
+    """Convert exactly one original 64x64 source into 4096 binary bits.
+
+    RGBA with an all-black RGB plane (Cc.logo.circle.png in the repository)
+    must be read with --binary-channel alpha. The choice is explicit and
+    recorded in the experiment contract; never silently treat transparency
+    as black watermark pixels.
+    """
+    if binary_channel not in ("luma", "alpha"):
+        raise ValueError("binary_channel must be luma or alpha")
     with Image.open(path) as img:
-        if img.size != (64, 64):
-            raise ValueError(f"Expected 64x64 original watermark, got {img.size}: {path}")
-        if img.mode == "RGBA":
-            a = np.asarray(img.getchannel("A"))
-            rgb = np.asarray(img.convert("RGB"))
-            if np.all(rgb == 0) and np.any(a != 255):
-                raise ValueError("Alpha-only watermark requires an explicit conversion; refusing all-black RGB")
-        image = np.asarray(img.convert("L"), dtype=np.uint8)
+        if img.size != SOURCE_SHAPE:
+            raise ValueError(f"Expected 64x64 source watermark, got {img.size}: {path}")
+        if binary_channel == "alpha":
+            if "A" not in img.getbands():
+                raise ValueError("Alpha channel requested but the source image has no alpha")
+            image = np.asarray(img.getchannel("A"), dtype=np.uint8)
+        else:
+            if "A" in img.getbands():
+                rgb = np.asarray(img.convert("RGB"))
+                alpha = np.asarray(img.getchannel("A"))
+                if np.all(rgb == 0) and np.any(alpha != 255):
+                    raise ValueError("Alpha-only watermark: rerun with --binary-channel alpha")
+            image = np.asarray(img.convert("L"), dtype=np.uint8)
     bits = (image >= 127).astype(np.uint8).ravel()
     if bits.size != DATA_BITS or bits.min() == bits.max():
-        raise ValueError("Watermark must contain 4096 bits and both bit values")
+        raise ValueError("Watermark must contain 4096 bits and both binary values")
     return bits
 
 
@@ -195,18 +210,36 @@ def make_wrapper(method: str, *, resize_to: int = 256, device: str = "auto", mod
 
 
 def _metrics(truth: np.ndarray, rec: Recovered) -> dict:
-    """Conditional NC/BER remain undefined on missing bits; no fabricated predictions."""
-    known = rec.valid
-    conditional_nc,conditional_ncc = _nc_ncc(truth[known], rec.bits[known]) if known.any() else (None,None)
-    conditional_ber = float(np.mean(truth[known] != rec.bits[known])) if known.any() else None
-    zero_nc,zero_ncc = _nc_ncc(truth,rec.bits)
-    return {"nc": conditional_nc, "ncc":conditional_ncc,"ber":conditional_ber,
-            "nc_zero_fill":zero_nc, "ncc_zero_fill":zero_ncc,
-            "ber_erasure_as_error":float(np.mean(np.where(known, truth != rec.bits, True))),
+    """Coverage-aware *complete 4096-bit* scores; erased bits are errors.
+
+    Ordinary NC and BER are conditional on successful chunk extraction;
+    they are deliberately undefined if coverage == 0. The numerical,
+    ALL-bit comparison is fraction_correct_all_bits = 1 - BER_erasure.
+    Never mistake a zero-filled NC for NC over 4096 extracted bits.
+    """
+    truth = np.asarray(truth, np.uint8).ravel()
+    bits = np.asarray(rec.bits, np.uint8).ravel()
+    known = np.asarray(rec.valid, bool).ravel()
+    if truth.shape != (DATA_BITS,) or bits.shape != truth.shape or known.shape != truth.shape:
+        raise ValueError("Incorrect 4096-bit original or extracted vectors")
+    correct = int(np.count_nonzero(known & (truth == bits)))
+    wrong = int(np.count_nonzero(known & (truth != bits)))
+    erased = int(np.count_nonzero(~known))
+    conditional_nc, conditional_ncc = _nc_ncc(truth[known], bits[known]) if known.any() else (None, None)
+    conditional_ber = wrong / int(known.sum()) if known.any() else None
+    zero_nc, zero_ncc = _nc_ncc(truth,bits)
+    complete = bool(known.all())
+    return {"nc": conditional_nc, "ncc": conditional_ncc,
+            "ber": conditional_ber, "nc_zero_fill":zero_nc,"ncc_zero_fill":zero_ncc,
+            "nc_full_coverage":(_nc_ncc(truth, bits)[0] if complete else None),
+            "ber_erasure_as_error": (wrong + erased) / DATA_BITS,
+            "fraction_correct_all_bits": correct / DATA_BITS,
+            "total_correct_bits":correct,"total_wrong_bits":wrong,"total_erased_bits":erased,
             "bit_coverage":float(np.mean(known)),
-            "exact_recovery":int(bool(np.all(known) and np.array_equal(truth, rec.bits))),
+            "exact_recovery":int(complete and wrong == 0),
             "decoded_chunks":rec.good_chunks,"total_chunks":rec.chunks,
-            "error": " | ".join(rec.errors[:3]) + (f" (+{len(rec.errors)-3} more)" if len(rec.errors)>3 else "")}
+            "erasure_notes":" | ".join(rec.errors[:3]) + (f" (+{len(rec.errors)-3} more)" if len(rec.errors)>3 else ""),
+            "error":""}
 
 
 def _save_csv(path: Path, rows: list[dict]) -> None:
@@ -223,7 +256,7 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
         resize_to: int = 256, device: str = 'auto', model_type: str = 'Q',
         max_clean_ber: float = .05, min_clean_coverage: float = .95,
         force_full: bool = False, save_images: bool = False,
-        wrapper_factory: Callable[[str], SpatialChunk4096] | None = None) -> list[dict]:
+        binary_channel: str = 'luma', wrapper_factory: Callable[[str], SpatialChunk4096] | None = None) -> list[dict]:
     """Run all attacks on ONE complete marked host, with per-host resume.
 
     For full testing, host_dir must be the existing held-out split directory;
@@ -232,17 +265,17 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
     output = Path(output)
     output.mkdir(parents=True,exist_ok=True)
     hosts = _hosts(Path(host_dir), max_images)
-    truth = watermark_bits(Path(watermark))
+    truth = watermark_bits(Path(watermark), binary_channel=binary_channel)
     cases = default_attack_suite(include_none=False, preset=attack_preset)
     if max_attacks < 0: raise ValueError('max_attacks must be nonnegative')
     if max_attacks: cases = cases[:max_attacks]
     all_rows = []
     manifest = {'mode':'experimental_spatial_chunk_4096', 'native_model_4096_support': False,
-                'status':'running', 'source_payload_bits':DATA_BITS,
+                'status':'running', 'source_payload_bits':DATA_BITS, 'binary_channel':binary_channel,
                 'watermark_sha256':hashlib.sha256(Path(watermark).read_bytes()).hexdigest(),
                 'methods':list(methods),'hosts':[x.name for x in hosts],
                 'attacks':[x.name for x in cases],'attack_preset':attack_preset,
-                'config':{'resize_to':resize_to,'max_clean_ber':max_clean_ber,
+                'config':{'resize_to':resize_to,'max_clean_ber':max_clean_ber,'binary_channel':binary_channel,
                           'min_clean_coverage':min_clean_coverage,'force_full':force_full},
                 'python':platform.python_version(), 'numpy':np.__version__,
                 'warning':'Matched 4096-bit source watermark, NOT native 4096-bit pretrained-model capacity. Full clean extraction is not guaranteed.'}
@@ -253,7 +286,7 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
             sidecar = output / method / (host_path.stem + '_config.json')
             run_contract = {
                 "host_sha256":hashlib.sha256(host_path.read_bytes()).hexdigest(),
-                "watermark_sha256":manifest["watermark_sha256"],
+                "watermark_sha256":manifest["watermark_sha256"], "binary_channel":binary_channel,
                 "method":method,"native_capacity":wrapper.capacity,"region_cols":wrapper.cols,
                 "resize_to":wrapper.resize_to,"attacks":[c.name for c in cases],
                 "device":device,"model_type":model_type,"force_full":force_full,
@@ -319,7 +352,7 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
             if cache_ok:
                 with Image.open(cache) as im:
                     marked=np.asarray(im.convert('RGB'), dtype=np.uint8)
-                embed_sec = float(previous[0].get('embedding_time_sec') or 0) if previous else 0.0
+                embed_sec = float(previous[0].get('embedding_time_sec') or 0) if previous else float(saved_contract.get('embedding_time_sec') or 0)
             else:
                 # If the previous checkpoint was created by an older version
                 # without this cache, discard ALL old measurements for this host.
@@ -344,7 +377,7 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
                 cache_tmp.replace(cache)
                 previous=[]
                 cache_ok=True
-            run_contract = {**run_contract, 'marked_sha256':hashlib.sha256(cache.read_bytes()).hexdigest()}
+            run_contract = {**run_contract, 'marked_sha256':hashlib.sha256(cache.read_bytes()).hexdigest(), 'embedding_time_sec':embed_sec}
             # Save provenance immediately, even if the clean decoder is interrupted.
             side_tmp=sidecar.with_suffix('.json.tmp')
             side_tmp.write_text(json.dumps(run_contract, indent=2),encoding='utf-8')
@@ -415,13 +448,13 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
     summaries=[]
     for (name,phase), grp in df[df.phase.isin(('before_attack','after_attack'))].groupby(['method_id','phase']):
         row={'method_id':name,'phase':phase,'n':len(grp),
-             'failure_aware_protocol':'zero_fill_NC_and_erasure_as_error_BER_are_diagnostic_scores'}
-        for k in ('psnr','ssim','nc','ncc','ber','nc_zero_fill','ncc_zero_fill','ber_erasure_as_error','bit_coverage',
+             'failure_aware_protocol':'erased_chunks_count_as_errors; conditional_NC_excludes_erasures; full_NC_defined_only_at_100pct_coverage'}
+        for k in ('psnr','ssim','nc','ncc','ber','nc_zero_fill','ncc_zero_fill','ber_erasure_as_error','fraction_correct_all_bits','nc_full_coverage','bit_coverage',
                   'exact_recovery','decoded_chunks','embedding_time_sec','extraction_time_sec'):
             row[k+'_mean']=float(pd.to_numeric(grp[k],errors='coerce').mean())
         summaries.append(row)
     summary_columns=['method_id','phase','n','failure_aware_protocol'] + [
-        k+'_mean' for k in ('psnr','ssim','nc','ncc','ber','nc_zero_fill','ncc_zero_fill','ber_erasure_as_error',
+        k+'_mean' for k in ('psnr','ssim','nc','ncc','ber','nc_zero_fill','ncc_zero_fill','ber_erasure_as_error','fraction_correct_all_bits','nc_full_coverage',
                            'bit_coverage','exact_recovery','decoded_chunks',
                            'embedding_time_sec','extraction_time_sec')]
     # Keep a readable CSV schema even if every embed fails and no summary row exists.
@@ -465,6 +498,7 @@ def main(argv=None):
     p.add_argument('--min-clean-coverage',type=float,default=.95)
     p.add_argument('--force-full',action='store_true')
     p.add_argument('--save-images',action='store_true')
+    p.add_argument('--binary-channel',choices=['luma','alpha'],default='luma',help='Specify source bit plane; Cc.logo.circle.png requires alpha')
     a=p.parse_args(argv)
     methods=tuple(x.strip().lower() for x in a.methods.split(',') if x.strip())
     if not methods or not set(methods).issubset({'wam','trustmark'}): p.error('Methods must be trustmark,wam')
@@ -472,7 +506,7 @@ def main(argv=None):
         attack_preset=a.attack_preset,max_attacks=a.max_attacks,max_images=a.max_images,
         resize_to=a.resize_to,device=a.device,model_type=a.model_type,
         max_clean_ber=a.max_clean_ber,min_clean_coverage=a.min_clean_coverage,
-        force_full=a.force_full,save_images=a.save_images)
+        force_full=a.force_full,save_images=a.save_images,binary_channel=a.binary_channel)
 
 
 if __name__=='__main__': main()

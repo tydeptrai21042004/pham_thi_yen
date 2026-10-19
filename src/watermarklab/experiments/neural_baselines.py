@@ -45,9 +45,23 @@ class TrustMarkAdapter:
             from trustmark import TrustMark
         except ImportError as exc:
             raise RuntimeError("TrustMark dependency unavailable. Install: pip install trustmark") from exc
-        self.model = TrustMark(verbose=False, model_type=model_type, encoding_type=TrustMark.Encoding.BCH_5)
+        # TrustMark 0.9.x supports an explicit device. Do not report GPU
+        # performance while the library silently selects CPU.
+        if device not in ('auto', 'cuda', 'cpu'):
+            raise ValueError('TrustMark device must be auto, cuda, or cpu')
+        if device == 'cuda':
+            import torch
+            if not torch.cuda.is_available():
+                raise RuntimeError('GPU requested but CUDA is unavailable. Enable GPU in Kaggle settings.')
+        selected_device = ('cuda' if device == 'auto' else device)
+        if device == 'auto':
+            import torch
+            selected_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.model = TrustMark(verbose=False, model_type=model_type,
+                               encoding_type=TrustMark.Encoding.BCH_5,
+                               device=selected_device)
         self.capacity = int(self.model.schemaCapacity())
-        self.device = "upstream-selected"
+        self.device = selected_device
         if self.capacity <= 0:
             raise ValueError(f"Invalid TrustMark native payload capacity: {self.capacity}")
 

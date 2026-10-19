@@ -1,0 +1,62 @@
+{
+  "best_params": {
+    "arnold_iterations": 17,
+    "dwt_bands": [
+      "LL",
+      "HL",
+      "HH",
+      "LH"
+    ],
+    "dwt_mode": "pywt",
+    "block_size": 4,
+    "private_key": "KB123",
+    "repeat": null,
+    "q4_tau": 0.448479317241545,
+    "q4_margin": 0.09210328429225596,
+    "h01_q": 9.75651853405941,
+    "h01_margin": 0.7806620054724488,
+    "min_survival_rate": 0.75,
+    "bss_weight": 0.75,
+    "mse_weight": 0.25,
+    "max_q_cand_mse": 0.18,
+    "max_h_cand_mse": 0.24,
+    "q4_givens_theta_max": 0.42,
+    "q4_givens_coarse_steps": 13,
+    "q4_givens_fine_theta_max": 0.08,
+    "q4_givens_fine_steps": 0,
+    "q4_givens_passes": 1,
+    "q4_givens_mse_weight": 0.1,
+    "q4_givens_extra_margin_weight": 0.04,
+    "q4_givens_pairs": [
+      [
+        0,
+        2
+      ],
+      [
+        1,
+        3
+      ],
+      [
+        0,
+        1
+      ]
+    ],
+    "fast_candidate_scoring": true,
+    "require_contrastive_embedding": false,
+    "watermark_dwt_enabled": true,
+    "watermark_payload_band": "LL",
+    "host_embed_color_space": "YCrCb",
+    "host_channels": [
+      0
+    ],
+    "structured_repetition_enabled": true,
+    "ablation_name": "full",
+    "q4_enabled": true,
+    "hpos_enabled": true,
+    "arnold_enabled": true,
+    "candidate_selection_mode": "bss_mse"
+  },
+  "provenance": "global_best NB0215 training-only from prior optimized params",
+  "source_optimization_sha256": "be1b100ee8bc1b2d4be5942ec603ed9675f4fe65a40f582564eedb5926f33313",
+  "watermark": "A"
+}
