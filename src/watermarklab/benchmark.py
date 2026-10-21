@@ -288,16 +288,23 @@ def load_gaata_param_file(path: str | Path) -> dict[str, Any]:
     }
 
 
-def _select_gaata_key_params_for_image(host_path: Path, loaded_payload: dict[str, Any] | None) -> tuple[tuple[float, float, float, float] | None, str]:
+def _select_gaata_key_params_for_image(host_path: Path, loaded_payload: dict[str, Any] | None,
+                                       *, allow_per_image: bool = False) -> tuple[tuple[float, float, float, float] | None, str]:
     if not loaded_payload or not loaded_payload.get("loaded"):
         return None, "default"
-    per_image = dict(loaded_payload.get("per_image", {}))
-    for key in [host_path.name, host_path.stem, str(host_path)]:
-        if key in per_image:
-            return tuple(float(v) for v in per_image[key]), f"optimized:{loaded_payload.get('path')}:{key}"
+    # Frozen GLOBAL parameters first: per-host tuning on held-out images
+    # leaks test-host information into the comparison. Optional override is
+    # only for explicitly labeled diagnostic/legacy experiments.
+    if loaded_payload.get("global_key_params") is not None and not allow_per_image:
+        return tuple(float(v) for v in loaded_payload["global_key_params"]), f"optimized:{loaded_payload.get('path')}:global_frozen"
+    if allow_per_image:
+        per_image = dict(loaded_payload.get("per_image", {}))
+        for key in [host_path.name, host_path.stem, str(host_path)]:
+            if key in per_image:
+                return tuple(float(v) for v in per_image[key]), f"exploratory_per_host:{loaded_payload.get('path')}:{key}"
     if loaded_payload.get("global_key_params") is not None:
-        return tuple(float(v) for v in loaded_payload["global_key_params"]), f"optimized:{loaded_payload.get('path')}:global"
-    return None, "default"
+        return tuple(float(v) for v in loaded_payload["global_key_params"]), f"optimized:{loaded_payload.get('path')}:global_frozen"
+    return None, "default_no_frozen_training_params"
 
 
 def _restore_ablation_overrides(params: ProposalParams, requested: ProposalParams) -> ProposalParams:
@@ -441,6 +448,14 @@ def run_benchmark(
                     key_info["gaata_embedding_rule"] = str(getattr(method.config, "embedding_rule", "decimal"))
                     key_info["gaata_qim_step"] = float(getattr(method.config, "qim_step", 16.0))
                     key_info["gaata_use_fwa_inline"] = bool(method.use_fwa)
+                    key_info["gaata_protocol"] = ("paper_guided_decimal" if method.config.embedding_rule == "decimal"
+                                                  else "4096_bit_uint8_qim_adaptation")
+                    if method.config.embedding_rule == "decimal":
+                        # Diagnostic only. Do not replace reported uint8 BER
+                        # with near-perfect scores from an unsaved float image.
+                        float_decoded = method.extract_exact_float(key)
+                        key_info["gaata_clean_ber_float"] = float(ber(watermark, float_decoded))
+                        key_info["gaata_clean_ber_uint8"] = float(ber(watermark, extracted_clean))
                 if method_id == "guo2017_dwt_qr_fa" and isinstance(method, Guo2017DWTQRFA):
                     key_info["guo_param_source"] = guo_param_source
                     key_info["guo_lambda_strength"] = float(method.lambda_strength)

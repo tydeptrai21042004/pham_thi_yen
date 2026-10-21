@@ -67,7 +67,7 @@ def test_two_group_maxima_are_two_independent_candidates(n):
 
 
 def test_final_selector_does_not_collapse_h_groups_before_q_competition():
-    params = ProposalParams(min_survival_rate=0.0, bss_weight=1.0, mse_weight=0.0,
+    params = ProposalParams(h_selection_policy="independent", min_survival_rate=0.0, bss_weight=1.0, mse_weight=0.0,
                             max_q_cand_mse=10.0, max_h_cand_mse=10.0)
     base = [
         {'flag': FLAG_Q4, 'h_group': 'Q', 'score': 0.5, 'mse': 0.1, 'raw': 1.0, 'ok': True},
@@ -103,7 +103,7 @@ def test_end_to_end_uses_absolute_H_locations_and_records_energy_policy(n):
     rng = np.random.default_rng(n*11 + 7)
     host = rng.integers(0,256, size=(128,128,3), dtype=np.uint8)
     watermark = (rng.integers(0,2,size=(16,16),dtype=np.uint8)*255).astype(np.uint8)
-    params = ProposalParams(block_size=n, repeat=1, q4_enabled=False,
+    params = ProposalParams(h_selection_policy="independent", block_size=n, repeat=1, q4_enabled=False,
                             min_survival_rate=0.25, max_h_cand_mse=25.0)
     model = ProposalQHDWTHess(params=params)
     image, key = model.embed(host, watermark)
@@ -136,7 +136,7 @@ def test_full_embed_exposes_three_separate_candidates_to_selector(monkeypatch):
     rng = np.random.default_rng(303)
     host = rng.integers(0, 256, size=(64,64,3), dtype=np.uint8)
     watermark = rng.integers(0,2,size=(8,8),dtype=np.uint8)*255
-    model = ProposalQHDWTHess(params=ProposalParams(block_size=4, repeat=1,
+    model = ProposalQHDWTHess(params=ProposalParams(h_selection_policy="independent", block_size=4, repeat=1,
         q4_enabled=True, hpos_enabled=True, min_survival_rate=0.0,
         max_h_cand_mse=25.0, max_q_cand_mse=25.0))
     image, key = model.embed(host, watermark)

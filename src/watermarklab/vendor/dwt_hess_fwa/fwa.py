@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .watermark import WatermarkConfig, embed_watermark
+from .metrics import mse, psnr
 
 
 @dataclass
@@ -48,8 +49,12 @@ def optimize_key_params(
 
     def evaluate(params: np.ndarray) -> tuple[float, float]:
         cfg = WatermarkConfig(**{**base_config.__dict__, "key_params": tuple(float(v) for v in params)})
-        _, _, meta = embed_watermark(cover_rgb, watermark_bits, cfg)
-        return meta.mse_float, meta.psnr_float
+        _, marked_uint8, meta = embed_watermark(cover_rgb, watermark_bits, cfg)
+        # Optimize the image that will actually be SAVED and attacked.  The
+        # float-domain objective can reward changes that disappear at uint8.
+        source = np.asarray(cover_rgb, dtype=np.float64)[:marked_uint8.shape[0], :marked_uint8.shape[1]]
+        actual_mse = mse(source, marked_uint8.astype(np.float64))
+        return float(actual_mse), float(psnr(source, marked_uint8.astype(np.float64)))
 
     best_params = None
     best_mse = float("inf")

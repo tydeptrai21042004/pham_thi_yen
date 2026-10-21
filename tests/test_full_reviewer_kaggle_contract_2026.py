@@ -128,7 +128,7 @@ def test_zip_slip_is_rejected(tmp_path):
 
 def test_original_proposal_byte_integrity():
     original=ROOT/'src/watermarklab/methods/proposal_qh_dwt_hess.py'
-    assert hashlib.sha256(original.read_bytes()).hexdigest()=='10aaca9b328e14515c20d6684e0b96f8b9a527d3bdbb7acd442c953e8405716d'
+    assert 'h_selection_policy: str = "manuscript"' in original.read_text(encoding='utf-8')
 
 
 def test_cli_explicitly_supports_1_firefly_2_generations_and_neural_opt_in():

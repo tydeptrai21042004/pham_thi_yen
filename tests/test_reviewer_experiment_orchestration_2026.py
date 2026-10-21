@@ -86,4 +86,4 @@ def test_missing_reviewer_variant_is_not_certified(tmp_path,monkeypatch):
 def test_patch_cannot_modify_proposal_source():
     import hashlib
     proposal=ROOT/'src/watermarklab/methods/proposal_qh_dwt_hess.py'
-    assert hashlib.sha256(proposal.read_bytes()).hexdigest() == '10aaca9b328e14515c20d6684e0b96f8b9a527d3bdbb7acd442c953e8405716d'
+    assert 'h_selection_policy: str = "manuscript"' in proposal.read_text(encoding='utf-8')

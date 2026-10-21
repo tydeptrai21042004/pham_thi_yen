@@ -43,7 +43,7 @@ class Gaata2022DWTHessFWA:
         original-rerun:
             Paper-faithful local rerun mode for this baseline. It switches on the
             decimal-digit Hessenberg rule, uses stronger chaotic keys, and runs the
-            larger FWA-style search configured from the paper settings.
+            a separate FWA fitting stage, only when explicitly requested.
     """
 
     name = "Gaata2022_DWT_Hess_FWA"
@@ -64,7 +64,9 @@ class Gaata2022DWTHessFWA:
         seed: int = 2022,
         mode: str = "adapt",
     ):
-        self.mode = str(mode)
+        self.mode = str(mode).strip().lower()
+        if self.mode not in {"adapt", "original-rerun"}:
+            raise ValueError("Gaata mode must be adapt or original-rerun")
         if embedding_rule is None:
             # The paper-style decimal rule is preserved for original-rerun.
             # Adapted benchmark mode uses QIM because the decimal rule is lost
@@ -72,23 +74,15 @@ class Gaata2022DWTHessFWA:
             embedding_rule = "decimal" if self.mode == "original-rerun" else "qim"
 
         if self.mode == "original-rerun":
-            # Paper-faithful correction requested by the user:
-            #   * use the decimal digit after the floating point instead of the
-            #     quantization-aware parity shortcut used by the quick adapted mode;
-            #   * use a stronger chaotic-key contribution than 0.020;
-            #   * run the larger Firework Algorithm setting reported in the paper
-            #     (population N=100 and mutation-spark number=5).
-            #
-            # The paper does not state an exact iteration count, so we use at least
-            # 10 optimizer iterations for a serious local rerun while still allowing
-            # a caller to pass a larger value.
-            decimal_position = 3
-            key_strength = 1.0
+            # Paper-style decimal parity, but the publication does NOT fix the
+            # complete numeric setup. Keep caller-provided digit, chaotic-key
+            # amplitude and optimizer budget, rather than silently selecting
+            # arbitrary values or fitting keys to a held-out evaluation image.
+            # Use the separate benchmark optimization phase on TRAINING hosts
+            # and then load its globally frozen key parameters for test hosts.
+            if embedding_rule not in ("decimal", None):
+                raise ValueError("original-rerun must use the paper-style decimal rule")
             embedding_rule = "decimal"
-            use_fwa = True
-            fwa_population = max(int(fwa_population), 100)
-            fwa_iterations = max(int(fwa_iterations), 10)
-            fwa_sparks = max(int(fwa_sparks), 5)
 
         self.config = WatermarkConfig(
             block_size=int(block_size),
@@ -100,6 +94,8 @@ class Gaata2022DWTHessFWA:
             embedding_rule=str(embedding_rule),
             qim_step=float(qim_step),
         )
+        # Inline FWA is an explicitly requested *exploratory* fit: do not use
+        # this on held-out test hosts for paper comparison.
         self.use_fwa = bool(use_fwa)
         self.fwa_population = int(fwa_population)
         self.fwa_iterations = int(fwa_iterations)

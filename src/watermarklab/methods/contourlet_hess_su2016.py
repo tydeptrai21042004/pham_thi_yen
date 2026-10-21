@@ -67,6 +67,9 @@ class Su2016ContourletHessenberg:
     def __init__(self, mode="adapt", seed=2016, arnold_rounds=10,
                  quantization_step=16.0, channel=2):
         self.mode = str(mode).strip().lower()
+        # The supplied article omits exact LP/DFB analysis filters; this repo
+        # implements an exactly invertible BOX-LP approximation, not an exact
+        # published Contourlet analysis bank. Label outputs accordingly.
         if self.mode not in {"adapt", "original-rerun"}:
             raise ValueError("Only the 4096-bit adapted Su2016 variant is implemented")
         self.seed = int(seed)
@@ -85,6 +88,12 @@ class Su2016ContourletHessenberg:
     def embed(self, host_rgb, watermark_binary):
         host, bits = validate_rgb_watermark(host_rgb, watermark_binary)
         self._validate_size(host, bits.shape)
+        if self.mode == "original-rerun":
+            raise NotImplementedError(
+                "Exact Su2016 Contourlet reproduction is unavailable: the paper does not "
+                "specify LP/DFB filters. Use mode='adapt' for the labeled box-LP "
+                "4096-bit implementation."
+            )
         low, high = lp_analysis(host[..., self.channel])
         nr, nc = low.shape[0] // 4, low.shape[1] // 4
         if nr * nc != bits.size:

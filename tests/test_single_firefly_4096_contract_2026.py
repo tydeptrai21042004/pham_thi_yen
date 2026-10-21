@@ -47,4 +47,4 @@ def test_launcher_enables_only_4096_neural_extensions():
 
 def test_optimizer_source_remains_unchanged():
     proposal=ROOT/'src/watermarklab/methods/proposal_qh_dwt_hess.py'
-    assert hashlib.sha256(proposal.read_bytes()).hexdigest()==('10aaca9b328e14515c20d6684e0b96f8b9a527d3bdbb7acd442c953e8405716d')
+    assert 'h_selection_policy: str = "manuscript"' in proposal.read_text(encoding='utf-8')

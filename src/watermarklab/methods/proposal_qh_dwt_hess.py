@@ -154,6 +154,10 @@ class ProposalParams:
     hpos_enabled: bool = True
     arnold_enabled: bool = True
     candidate_selection_mode: str = "bss_mse"
+    # Manuscript: choose the lowest-distortion eligible H coefficient first,
+    # then compare that single H candidate against Q. "independent" preserves
+    # the previous three-way Q/H-diagonal/H-subdiagonal experiment.
+    h_selection_policy: str = "manuscript"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "ProposalParams":
@@ -198,6 +202,8 @@ class ProposalParams:
 
         # Keep H-domain margin inside the same safe interval used by the source script.
         params.h01_margin = min(float(params.h01_margin), 0.49 * float(params.h01_q))
+        if params.h_selection_policy not in {"manuscript", "independent"}:
+            raise ValueError("h_selection_policy must be manuscript or independent")
         return params
 
     def to_dict(self) -> dict[str, Any]:
@@ -643,6 +649,11 @@ def _build_q4_candidate(block: np.ndarray, bit: int, params: ProposalParams) -> 
         improved = False
 
         for a, b in params.q4_givens_pairs:
+            # phi_Q is the squared norm of rows 1 and 2 (zero based).
+            # Rotations entirely within, or entirely outside, this row set
+            # cannot change phi_Q, and waste time in the angle search.
+            if (int(a) in (1, 2)) == (int(b) in (1, 2)):
+                continue
             local_best_Q = best_Q
             local_best_key = (best_loss, best_mse, -best_margin)
 
@@ -897,6 +908,14 @@ def _select_candidate_for_ablation(cands: list[dict], params: ProposalParams) ->
     if not pool:
         return None
 
+    if params.h_selection_policy == "manuscript":
+        # The manuscript first picks the smallest-MSE *eligible* H position,
+        # then compares it with Q using the active BSS/MSE (or ablation) rule.
+        # Do not accidentally choose an invalid H candidate to represent H.
+        h_pool = [c for c in pool if int(c["flag"]) == FLAG_HPOS]
+        if len(h_pool) > 1:
+            h_winner = min(h_pool, key=lambda c: (float(c["mse"]), -float(c["score"])))
+            pool = [c for c in pool if int(c["flag"]) != FLAG_HPOS] + [h_winner]
     if mode in {"mse", "mse_only", "min_mse"}:
         return min(pool, key=lambda c: float(c["mse"]))
     if mode in {"bss", "bss_only", "survival_only"}:
@@ -1140,7 +1159,9 @@ class ProposalQHDWTHess:
                 "parameter_snapshot": _to_json_safe(params.to_dict()),
                 "block_hash": "SHA-256",
                 "h_candidates": ["best_main_diagonal_energy", "best_first_subdiagonal_energy"],
-                "candidate_competition": "Q_vs_independent_H_main_diagonal_vs_independent_H_first_subdiagonal",
+                "candidate_competition": ("H_min_MSE_then_Q_vs_H" if params.h_selection_policy == "manuscript"
+                                          else "Q_vs_independent_H_main_diagonal_vs_independent_H_first_subdiagonal"),
+                "h_selection_policy": str(params.h_selection_policy),
                 "h_group_selected": dict(h_group_selected),
                 "embedding_error_count_sampled": int(len(embedding_errors)),
                 "weighted_voting_removed": True,
@@ -1151,7 +1172,9 @@ class ProposalQHDWTHess:
             }
         )
 
-        wm_meta["h_candidate_policy"] = "per_block_best_diagonal_and_subdiagonal_H_energy"
+        wm_meta["h_candidate_policy"] = ("manuscript_lowest_MSE_eligible_H_then_Q_competition"
+                                          if params.h_selection_policy == "manuscript"
+                                          else "per_block_best_diagonal_and_subdiagonal_H_energy")
         wm_meta["h_energy_definition"] = "squared_H_coefficient_magnitude"
         wm_meta["h_position_encoding"] = "2 + 16 * row + column (zero based)"
         wm_meta["h_grouped_candidate_count"] = 2

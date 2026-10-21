@@ -50,6 +50,7 @@ RESULT_COLUMNS = [
     "source_payload_bits", "encoded_chunk_slots", "side_info_bytes", "error",
     "erasure_notes", "fraction_correct_all_bits", "nc_full_coverage",
     "total_correct_bits", "total_wrong_bits", "total_erased_bits",
+    "decode_status", "rejected_chunks", "exception_chunks", "invalid_chunks", "missing_chunks",
 ]
 
 
@@ -112,6 +113,9 @@ class Recovered:
     good_chunks: int
     chunks: int
     errors: list[str]
+    rejected_chunks: int = 0
+    exception_chunks: int = 0
+    invalid_chunks: int = 0
 
 
 class SpatialChunk4096:
@@ -172,16 +176,21 @@ class SpatialChunk4096:
         valid = np.zeros_like(recovered, dtype=bool)
         errors: list[str] = []
         good = 0
+        rejected = 0
+        exceptions = 0
+        invalid = 0
         for i, (y0, y1, x0, x1) in enumerate(self.regions):
             try:
                 patch = self._prepare(image[y0:y1, x0:x1])
                 decoded, present = self.native.detect(patch)
                 if decoded is None or present is False:
                     errors.append(f"chunk {i}: decoder rejected or returned no message")
+                    rejected += 1
                     continue
                 v = np.asarray(decoded, dtype=np.uint8).reshape(-1)
                 if v.size != self.capacity or not np.isin(v, (0, 1)).all():
                     errors.append(f"chunk {i}: invalid decoded payload")
+                    invalid += 1
                     continue
                 a, b = i*self.capacity, (i+1)*self.capacity
                 recovered[a:b] = v
@@ -189,7 +198,9 @@ class SpatialChunk4096:
                 good += 1
             except Exception as exc:
                 errors.append(f"chunk {i}: {type(exc).__name__}: {exc}")
-        return Recovered(recovered[:DATA_BITS], valid[:DATA_BITS], good, self.chunk_count, errors)
+                exceptions += 1
+        return Recovered(recovered[:DATA_BITS], valid[:DATA_BITS], good, self.chunk_count,
+                         errors, rejected, exceptions, invalid)
 
     @property
     def layout_bytes(self) -> int:
@@ -238,6 +249,12 @@ def _metrics(truth: np.ndarray, rec: Recovered) -> dict:
             "bit_coverage":float(np.mean(known)),
             "exact_recovery":int(complete and wrong == 0),
             "decoded_chunks":rec.good_chunks,"total_chunks":rec.chunks,
+            "decode_status": ("no_chunks_decoded" if rec.good_chunks == 0 else
+                              "complete" if complete else "partial_coverage"),
+            "rejected_chunks":rec.rejected_chunks,
+            "exception_chunks":rec.exception_chunks,
+            "invalid_chunks":rec.invalid_chunks,
+            "missing_chunks":max(0, rec.chunks-rec.good_chunks),
             "erasure_notes":" | ".join(rec.errors[:3]) + (f" (+{len(rec.errors)-3} more)" if len(rec.errors)>3 else ""),
             "error":""}
 
@@ -450,12 +467,13 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
         row={'method_id':name,'phase':phase,'n':len(grp),
              'failure_aware_protocol':'erased_chunks_count_as_errors; conditional_NC_excludes_erasures; full_NC_defined_only_at_100pct_coverage'}
         for k in ('psnr','ssim','nc','ncc','ber','nc_zero_fill','ncc_zero_fill','ber_erasure_as_error','fraction_correct_all_bits','nc_full_coverage','bit_coverage',
-                  'exact_recovery','decoded_chunks','embedding_time_sec','extraction_time_sec'):
+                  'exact_recovery','decoded_chunks','rejected_chunks','exception_chunks','invalid_chunks',
+                  'embedding_time_sec','extraction_time_sec'):
             row[k+'_mean']=float(pd.to_numeric(grp[k],errors='coerce').mean())
         summaries.append(row)
     summary_columns=['method_id','phase','n','failure_aware_protocol'] + [
         k+'_mean' for k in ('psnr','ssim','nc','ncc','ber','nc_zero_fill','ncc_zero_fill','ber_erasure_as_error','fraction_correct_all_bits','nc_full_coverage',
-                           'bit_coverage','exact_recovery','decoded_chunks',
+                           'bit_coverage','exact_recovery','decoded_chunks','rejected_chunks','exception_chunks','invalid_chunks',
                            'embedding_time_sec','extraction_time_sec')]
     # Keep a readable CSV schema even if every embed fails and no summary row exists.
     pd.DataFrame(summaries,columns=summary_columns).to_csv(output/'comparison_4096.csv',index=False)
