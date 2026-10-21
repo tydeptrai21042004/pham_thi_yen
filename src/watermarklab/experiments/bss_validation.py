@@ -64,14 +64,14 @@ def validate_summary_rows(rows, expected_attacks, *, expected_host=None):
     return set(groups)==set(expected_attacks) and all(len(g)==1 for g in groups.values())
 
 
-def run(host:Path,watermark:Path,output:Path,*,host_size=128,watermark_size=16,repeat=None,max_attacks=3,param_file=None):
+def run(host:Path,watermark:Path,output:Path,*,host_size=128,watermark_size=16,repeat=None,max_attacks=3,param_file=None,attack_preset="reviewer_stress"):
     params=frozen_params(param_file, repeat=repeat)
     original=load_rgb(host,host_size)
     wm=load_binary(watermark,watermark_size)
     truth=prepare_binary_watermark_payload_from_array(wm,params)[1]
     method=ProposalQHDWTHess(params=params,use_optimizer=False)
     marked,key=method.embed(original,wm)
-    attacks=stratified_attack_subset(default_attack_suite(include_none=False,preset="reviewer_stress"),max_attacks)
+    attacks=stratified_attack_subset(default_attack_suite(include_none=False,preset=attack_preset),max_attacks)
     rows=[]
     for attack in attacks:
         try:
@@ -155,6 +155,7 @@ if __name__=="__main__":
     ap.add_argument("--watermark-size",type=int,default=16)
     ap.add_argument("--repeat",type=int,default=None)
     ap.add_argument("--max-attacks",type=int,default=3)
+    ap.add_argument("--attack-preset",default="reviewer_stress")
     a=ap.parse_args()
     if not a.host and not a.host_dir: ap.error("Provide --host or --host-dir")
     hosts=([a.host] if a.host else sorted(p for p in a.host_dir.iterdir() if p.suffix.lower() in ('.bmp','.png','.jpg'))[:a.max_hosts])
@@ -163,7 +164,7 @@ if __name__=="__main__":
     for host in hosts:
         result=run(host,a.watermark,a.output/host.stem,host_size=a.host_size,
                    watermark_size=a.watermark_size,repeat=a.repeat,max_attacks=a.max_attacks,
-                   param_file=a.param_file)
+                   param_file=a.param_file,attack_preset=a.attack_preset)
         combined.extend(result)
     (a.output/'host_level_summary.json').write_text(json.dumps(combined,indent=2))
     if combined:
@@ -180,6 +181,6 @@ if __name__=="__main__":
             total_samples=('samples','sum')).reset_index().to_csv(a.output/'bss_by_attack_group.csv',index=False)
     (a.output/'manifest.json').write_text(json.dumps({'hosts':[p.name for p in hosts],
           'n_hosts':len(hosts),'rows':len(combined),
-          'status':'PASS' if len(combined)==len(hosts)*len(stratified_attack_subset(default_attack_suite(include_none=False,preset='reviewer_stress'),a.max_attacks)) else 'FAIL',
+          'status':'PASS' if len(combined)==len(hosts)*len(stratified_attack_subset(default_attack_suite(include_none=False,preset=a.attack_preset),a.max_attacks)) else 'FAIL',
           'interpretation':'correlations are empirical, not mathematical proof of global robustness'},indent=2))
     print(json.dumps({'hosts':len(hosts),'summary_records':len(combined)},indent=2))

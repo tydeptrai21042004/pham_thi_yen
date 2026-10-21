@@ -883,8 +883,156 @@ def reviewer_complete_full_attack_suite(include_none: bool = True) -> list[Attac
     return unique if include_none else [a for a in unique if a.group != "none"]
 
 
+
+
+# Exact 43 ATTACKED rows in the manuscript's W1/W2 robustness tables.
+# Row 1 ('No attack') is an additional CLEAN control, not attack number one.
+# Retain duplicate-looking average/lowpass entries to match published tables.
+MANUSCRIPT43_FAMILIES = {
+    "compression": ("jpeg_q90", "jpeg_q70", "jpeg_q50", "jpeg_q40", "jpeg_q30",
+                    "jpeg2000_3_to_1", "jpeg2000_5_to_1", "jpeg2000_10_to_1"),
+    "noise": ("gaussian_var_0p003", "gaussian_var_0p005", "gaussian_var_0p05",
+              "salt_pepper_0p01", "salt_pepper_0p05",
+              "speckle_var_0p001", "speckle_var_0p005", "speckle_var_0p03"),
+    "filtering": ("median_3x3", "median_5x5", "average_3x3", "average_5x5",
+                  "lowpass_3x3", "lowpass_5x5"),
+    "geometry": ("rotation_5deg", "rotation_10deg", "rotation_15deg",
+                 "rotation_30deg", "rotation_45deg", "translation_5_5",
+                 "translation_10_0", "resize_0p5", "occlusion_25pct",
+                 "border_crop_pad_16"),
+    "light_colour": ("blur_1", "sharpen_1p5", "brightness_0p9", "contrast_0p9",
+                     "histogram_equalization"),
+    "combined": ("combined_jpeg2000_7_to_1_resize_0p5",
+                 "combined_jpeg2000_7_to_1_rotation_10deg",
+                 "combined_resize_0p5_blur_0p5",
+                 "combined_sharpen_0p5_jpeg90",
+                 "combined_speckle_0p001_resize_0p5",
+                 "combined_sharpen_0p5_speckle_0p001_jpeg2000_7_to_1"),
+}
+
+
+def manuscript43_family(attack_name: str) -> str:
+    if attack_name in ("clean", "no_attack"):
+        return "clean"
+    for family, names in MANUSCRIPT43_FAMILIES.items():
+        if attack_name in names:
+            return family
+    raise KeyError(f"Not a manuscript43 attack: {attack_name}")
+
+
+def manuscript43_attack_suite(include_none: bool = True) -> list[AttackConfig]:
+    """43 precisely enumerated parameter settings from Tables W1/W2.
+
+    All transforms act on RGB uint8 512x512 hosts. Noise variance is in the
+    [0,1] pixel domain; JPEG2000 quality_layers specify compression ratios.
+    Geometrical attacks preserve size but do not do image registration.
+    The manuscript does NOT specify exact operator libraries or boundary modes:
+    Pillow RGB, bicubic geometry, zero fill, and seeded RNG are documented
+    reproducible implementation choices, not an assertion of exact original code.
+    """
+    step=lambda g,p:{"group":g,"params":p}
+    C=AttackConfig
+    rows=[
+        # JPEG and JPEG2000 (8)
+        *[C(f"jpeg_q{q}","jpeg",{"quality":q}) for q in (90,70,50,40,30)],
+        *[C(f"jpeg2000_{q}_to_1","jpeg2000",{"quality_layer":float(q)}) for q in (3,5,10)],
+        # Noise (8)
+        *[C(f"gaussian_var_{str(v).replace('.','p')}","gaussian_noise_var",{"variance":v,"seed":123}) for v in (0.003,0.005,0.05)],
+        *[C(f"salt_pepper_{str(v).replace('.','p')}","salt_pepper",{"amount":v,"seed":123}) for v in (0.01,0.05)],
+        *[C(f"speckle_var_{str(v).replace('.','p')}","speckle_noise",{"variance":v,"seed":123}) for v in (0.001,0.005,0.03)],
+        # Filtering (6)
+        *[C(f"median_{n}x{n}","median_filter",{"size":n}) for n in (3,5)],
+        *[C(f"average_{n}x{n}","average_filter",{"size":n}) for n in (3,5)],
+        *[C(f"lowpass_{n}x{n}","lowpass",{"size":n}) for n in (3,5)],
+        # Geometric (10)
+        *[C(f"rotation_{a}deg","rotation",{"degrees":float(a)}) for a in (5,10,15,30,45)],
+        C("translation_5_5","translation",{"shift_x":5,"shift_y":5}),
+        C("translation_10_0","translation",{"shift_x":10,"shift_y":0}),
+        C("resize_0p5","resize",{"factor":0.5}),
+        C("occlusion_25pct","occlusion_fraction",{"fraction":0.25,"position":"center","value":0}),
+        C("border_crop_pad_16","border_crop_pad",{"pixels":16,"value":0}),
+        # Light and colour (5)
+        C("blur_1","gaussian_blur",{"radius":1.0}),
+        C("sharpen_1p5","unsharp_mask",{"radius":1.0,"percent":150,"threshold":0}),
+        C("brightness_0p9","brightness",{"factor":0.9}),
+        C("contrast_0p9","contrast",{"factor":0.9}),
+        C("histogram_equalization","hist_equalization",{}),
+        # Ordered combinations (6)
+        C("combined_jpeg2000_7_to_1_resize_0p5","combined",{"steps":[step("jpeg2000",{"quality_layer":7.0}),step("resize",{"factor":0.5})]}),
+        C("combined_jpeg2000_7_to_1_rotation_10deg","combined",{"steps":[step("jpeg2000",{"quality_layer":7.0}),step("rotation",{"degrees":10.0})]}),
+        C("combined_resize_0p5_blur_0p5","combined",{"steps":[step("resize",{"factor":0.5}),step("gaussian_blur",{"radius":0.5})]}),
+        C("combined_sharpen_0p5_jpeg90","combined",{"steps":[step("unsharp_mask",{"radius":0.5,"percent":50,"threshold":0}),step("jpeg",{"quality":90})]}),
+        C("combined_speckle_0p001_resize_0p5","combined",{"steps":[step("speckle_noise",{"variance":0.001,"seed":123}),step("resize",{"factor":0.5})]}),
+        C("combined_sharpen_0p5_speckle_0p001_jpeg2000_7_to_1","combined",{"steps":[step("unsharp_mask",{"radius":0.5,"percent":50,"threshold":0}),step("speckle_noise",{"variance":0.001,"seed":123}),step("jpeg2000",{"quality_layer":7.0})]}),
+    ]
+    expected=[name for names in MANUSCRIPT43_FAMILIES.values() for name in names]
+    actual=[x.name for x in rows]
+    if len(rows)!=43 or actual!=expected or len(actual)!=len(set(actual)):
+        raise AssertionError("Manuscript attack list no longer matches the 43 published rows")
+    return [C("no_attack","none",{})]+rows if include_none else rows
+
+
+
+# Reviewer extension of the manuscript's common 43 conditions.
+# Use IDENTICAL attack IDs/operators for W1 and W2 and all variants.
+REVIEWER45_FAMILIES = {
+    **{k: tuple(v) for k, v in MANUSCRIPT43_FAMILIES.items()},
+}
+REVIEWER45_FAMILIES["filtering"] = tuple(
+    n for n in MANUSCRIPT43_FAMILIES["filtering"] if n != "lowpass_3x3"
+)
+REVIEWER45_FAMILIES["geometry"] = (
+    *MANUSCRIPT43_FAMILIES["geometry"],
+    "resize_2p0", "crop_resize_50", "shear_x_0p10",
+)
+
+
+REVIEWER45_GROUPS = {
+    "compression": slice(0, 8),
+    "noise": slice(8, 16),
+    "filtering": slice(16, 21),
+    "geometry": slice(21, 34),
+    "light_colour": slice(34, 39),
+    "combined": slice(39, 45),
+}
+
+
+def reviewer45_family(attack_name: str) -> str:
+    if attack_name in ("clean", "no_attack"):
+        return "clean"
+    for family, names in REVIEWER45_FAMILIES.items():
+        if attack_name in names:
+            return family
+    raise KeyError(f"Not a reviewer45 attack: {attack_name}")
+
+
+def reviewer45_attack_suite(include_none: bool = True) -> list[AttackConfig]:
+    """Common 45 attacks: 43 - duplicate 3x3 lowpass + 3 geometric tests.
+
+    The 43-attack suite is unchanged. Results computed with this extension
+    must be reported as NEW measurements (never mixed with old 43 scores).
+    """
+    rows = [a for a in manuscript43_attack_suite(False) if a.name != "lowpass_3x3"]
+    # Insert new geometry cases directly after the existing geometry group.
+    new = [
+        AttackConfig("resize_2p0", "resize", {"factor": 2.0}),
+        AttackConfig("crop_resize_50", "crop_resize", {"keep": 0.5, "random_crop": False}),
+        AttackConfig("shear_x_0p10", "shear", {"shear_x": 0.10, "shear_y": 0., "fill": 0}),
+    ]
+    pos = next(i for i, a in enumerate(rows) if a.name == "border_crop_pad_16") + 1
+    rows[pos:pos] = new
+    expected = [name for names in REVIEWER45_FAMILIES.values() for name in names]
+    if len(rows) != 45 or [a.name for a in rows] != expected:
+        raise AssertionError("Reviewer45 attack definitions differ from the 45 agreed protocol rows")
+    return [AttackConfig("no_attack", "none", {})] + rows if include_none else rows
+
+
 def default_attack_suite(include_none: bool = True, preset: str = "lite") -> list[AttackConfig]:
     preset = str(preset).lower().strip()
+    if preset in {"manuscript43", "manuscript_43", "paper43", "common43"}:
+        return manuscript43_attack_suite(include_none=include_none)
+    if preset in {"reviewer45", "extended45"}:
+        return reviewer45_attack_suite(include_none=include_none)
     if preset in {"reviewer", "reviewer_stress", "revision"}:
         return reviewer_stress_attack_suite(include_none=include_none)
     if preset in {"none", "clean", "no_attack"}:

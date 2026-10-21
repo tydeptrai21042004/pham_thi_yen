@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from watermarklab.common.io_utils import load_host_rgb, load_watermark_binary, save_image, list_image_files
-from watermarklab.common.attack import default_attack_suite, apply_attack, AttackConfig
+from watermarklab.common.attack import default_attack_suite, apply_attack, AttackConfig, manuscript43_family, reviewer45_family
 from watermarklab.common.metrics import psnr, ssim, nc, ncc, ber
 from watermarklab.methods import build_methods, BASELINE_METHOD_IDS
 from watermarklab.methods.guo2017_dwt_qr_fa import Guo2017DWTQRFA
@@ -328,17 +328,14 @@ def _restore_ablation_overrides(params: ProposalParams, requested: ProposalParam
 def _select_proposal_params_for_image(host_path: Path, base_params: ProposalParams, loaded_payload: dict[str, Any] | None):
     if not loaded_payload or not loaded_payload.get("loaded"):
         return ProposalParams.from_dict(base_params.to_dict()), "default"
-    per_image = dict(loaded_payload.get("per_image", {}))
-    for key in [host_path.name, host_path.stem, str(host_path)]:
-        if key in per_image:
-            merged = base_params.to_dict()
-            merged.update(per_image[key])
-            return _restore_ablation_overrides(ProposalParams.from_dict(merged), base_params), f"optimized:{loaded_payload.get('path')}:{key}"
+    # Never select per-test-host optimized parameters when a frozen training-
+    # only global configuration exists. Otherwise a held-out run can leak
+    # test-host information despite advertising the same parameters.
     if loaded_payload.get("global_params"):
         merged = base_params.to_dict()
         merged.update(loaded_payload["global_params"])
-        return _restore_ablation_overrides(ProposalParams.from_dict(merged), base_params), f"optimized:{loaded_payload.get('path')}:global"
-    return ProposalParams.from_dict(base_params.to_dict()), "default"
+        return _restore_ablation_overrides(ProposalParams.from_dict(merged), base_params), f"optimized:{loaded_payload.get('path')}:global_frozen"
+    return ProposalParams.from_dict(base_params.to_dict()), "default_no_global_config"
 
 
 def run_benchmark(
@@ -1310,7 +1307,7 @@ def run_proposal_ablation_phase(
                 .reset_index()
             )
             attack_summary_df.to_csv(output_dir / "proposal_ablation_summary_by_variant_attack.csv", index=False)
-            attack_group_lookup = {a.name: str(a.group) for a in default_attack_suite(include_none=False,preset=attack_preset)}
+            attack_group_lookup = {a.name: (manuscript43_family(a.name) if attack_preset in ("manuscript43", "manuscript_43", "paper43", "common43") else reviewer45_family(a.name) if attack_preset in ("reviewer45", "extended45") else str(a.group)) for a in default_attack_suite(include_none=False,preset=attack_preset)}
             after_df["attack_group"] = after_df["attack"].map(attack_group_lookup).fillna("unknown")
             attack_group_df = (after_df.groupby(["proposal_ablation","attack_group"],dropna=False)
                               .agg(**agg_kwargs).reset_index())
@@ -2295,7 +2292,7 @@ def main():
     parser.add_argument("--max-images", type=int, default=None, help="Optional quick-run limit.")
     parser.add_argument("--no-save-images", action="store_true")
     parser.add_argument("--invert-watermark", action="store_true")
-    parser.add_argument("--attack-preset", default="lite", choices=["none", "lite", "full", "reviewer_stress", "stress", "script", "requested", "grid"], help="Attack preset for normal benchmark.")
+    parser.add_argument("--attack-preset", default="lite", choices=["none", "lite", "full", "reviewer_stress", "manuscript43", "reviewer45", "stress", "script", "requested", "grid"], help="Attack preset for normal benchmark.")
     parser.add_argument("--baseline-mode", default="adapt", choices=["adapt", "original", "original-rerun"], help="Global baseline mode: adapt runs local adapted benchmark; original writes paper-reported tables; original-rerun attempts a stricter local rerun.")
     parser.add_argument("--kumar-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"])
     parser.add_argument("--guo-mode", default="inherit", choices=["inherit", "adapt", "original", "original-rerun"])
@@ -2313,7 +2310,7 @@ def main():
     parser.add_argument("--guo-param-mode", default="auto", choices=["auto", "ignore", "require"], help="auto: use Guo lambda file if present; ignore: fixed/default lambda; require: fail if missing.")
     parser.add_argument("--guo-optimizer-fireflies", type=int, default=10)
     parser.add_argument("--guo-optimizer-generations", type=int, default=10)
-    parser.add_argument("--guo-optimizer-attack-preset", default="full", choices=["none", "lite", "full", "reviewer_stress", "stress", "script", "requested", "grid"], help="Attack preset used while optimizing Guo lambda.")
+    parser.add_argument("--guo-optimizer-attack-preset", default="full", choices=["none", "lite", "full", "reviewer_stress", "manuscript43", "reviewer45", "stress", "script", "requested", "grid"], help="Attack preset used while optimizing Guo lambda.")
     parser.add_argument("--guo-optimizer-alpha", type=float, default=0.01, help="FA randomization alpha, paper default 0.01.")
     parser.add_argument("--guo-optimizer-beta0", type=float, default=1.0, help="FA beta0, paper default 1.")
     parser.add_argument("--guo-optimizer-gamma", type=float, default=1.0, help="FA gamma, paper default 1.")
@@ -2340,7 +2337,7 @@ def main():
     parser.add_argument("--proposal-optimizer-trials", type=int, default=4, help="Legacy alias for --proposal-optimizer-fireflies.")
     parser.add_argument("--proposal-optimizer-fireflies", type=int, default=None)
     parser.add_argument("--proposal-optimizer-generations", type=int, default=2)
-    parser.add_argument("--proposal-optimizer-attack-preset", default="lite", choices=["none", "lite", "full", "reviewer_stress", "stress", "script", "requested", "grid"], help="Attack preset used while optimizing parameters.")
+    parser.add_argument("--proposal-optimizer-attack-preset", default="lite", choices=["none", "lite", "full", "reviewer_stress", "manuscript43", "reviewer45", "stress", "script", "requested", "grid"], help="Attack preset used while optimizing parameters.")
     parser.add_argument("--proposal-optimizer-alpha", type=float, default=0.18)
     parser.add_argument("--proposal-optimizer-beta0", type=float, default=1.0)
     parser.add_argument("--proposal-optimizer-gamma", type=float, default=1.0)

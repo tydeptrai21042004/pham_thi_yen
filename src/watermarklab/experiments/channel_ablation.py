@@ -17,13 +17,13 @@ from watermarklab.benchmark import load_proposal_param_file
 MODES={'Y':('YCrCb',(0,)), 'R':('RGB',(0,)), 'G':('RGB',(1,)), 'B':('RGB',(2,))}
 
 def run(host_dir:Path, watermark:Path, output:Path, *, param_file:Path,
-        preset:str='reviewer_stress', max_attacks:int=0, max_images:int|None=None):
+        preset:str='reviewer_stress', max_attacks:int=0, max_images:int|None=None, watermark_size:int=64):
     payload=load_proposal_param_file(param_file)
     if not payload.get('global_params'):
         raise ValueError('A trained global proposal parameter file is mandatory')
     host_files=[p for p in list_image_files(host_dir) if p.name.lower()!='lenna.bmp']
     if max_images:host_files=host_files[:max_images]
-    wm=load_watermark_binary(watermark)
+    wm=load_watermark_binary(watermark, size=watermark_size)
     attacks=default_attack_suite(False,preset)
     if max_attacks:attacks=attacks[:max_attacks]
     rows=[];errors=[]
@@ -72,6 +72,7 @@ if __name__=='__main__':
     ap.add_argument('--preset',default='reviewer_stress')
     ap.add_argument('--max-attacks',type=int,default=0)
     ap.add_argument('--max-images',type=int)
+    ap.add_argument('--watermark-size',type=int,default=64)
     a=ap.parse_args()
     print(json.dumps(run(a.host_dir,a.watermark,a.output,param_file=a.param_file,preset=a.preset,
-        max_attacks=a.max_attacks,max_images=a.max_images),indent=2))
+        max_attacks=a.max_attacks,max_images=a.max_images,watermark_size=a.watermark_size),indent=2))
