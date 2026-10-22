@@ -40,7 +40,10 @@ class TrustMarkAdapter:
     """Official TrustMark binary encoder; weights downloaded by upstream on first use."""
     name = "TrustMark"
 
-    def __init__(self, model_type: str = "Q", device: str = "auto"):
+    def __init__(self, model_type: str = "Q", device: str = "auto", wm_strength: float = 1.0):
+        if not (0.1 <= float(wm_strength) <= 3.0):
+            raise ValueError("TrustMark WM_STRENGTH must lie in [0.1, 3.0]")
+        self.wm_strength = float(wm_strength)
         try:
             from trustmark import TrustMark
         except ImportError as exc:
@@ -69,7 +72,12 @@ class TrustMarkAdapter:
         encoded = "".join(str(int(bit)) for bit in bits)
         if len(encoded) != self.capacity:
             raise ValueError(f"TrustMark requires {self.capacity} information bits")
-        image = self.model.encode(Image.fromarray(rgb), encoded, MODE="binary")
+        # This is TrustMark's documented, upstream strength control; it does not
+        # modify pretrained weights, ECC, data format or decoding acceptance.
+        kwargs = {"MODE": "binary"}
+        if self.wm_strength != 1.0:
+            kwargs["WM_STRENGTH"] = self.wm_strength
+        image = self.model.encode(Image.fromarray(rgb), encoded, **kwargs)
         return np.asarray(image.convert("RGB"), dtype=np.uint8)
 
     def detect(self, rgb: np.ndarray) -> tuple[np.ndarray | None, bool]:

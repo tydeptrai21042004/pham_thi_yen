@@ -51,6 +51,7 @@ RESULT_COLUMNS = [
     "erasure_notes", "fraction_correct_all_bits", "nc_full_coverage",
     "total_correct_bits", "total_wrong_bits", "total_erased_bits",
     "decode_status", "rejected_chunks", "exception_chunks", "invalid_chunks", "missing_chunks",
+    "fallback_chunks",
 ]
 
 
@@ -116,6 +117,7 @@ class Recovered:
     rejected_chunks: int = 0
     exception_chunks: int = 0
     invalid_chunks: int = 0
+    fallback_chunks: int = 0
 
 
 class SpatialChunk4096:
@@ -126,12 +128,24 @@ class SpatialChunk4096:
     followed by restoration to the original region size. Does not silently
     change the host size or combine different original host images.
     """
-    def __init__(self, native: Any, *, name: str, cols: int, resize_to: int = 256):
+    def __init__(self, native: Any, *, name: str, cols: int, resize_to: int = 256,
+                 projection: str = "legacy", residual_gain: float = 1.0,
+                 decode_views: str = "bicubic"):
         self.native = native
         self.name = name
         self.capacity = int(native.capacity)
         self.cols = cols
         self.resize_to = int(resize_to)
+        self.projection = str(projection).lower()
+        self.residual_gain = float(residual_gain)
+        self.decode_views = tuple(x.strip().lower() for x in decode_views.split(",") if x.strip())
+        if self.projection not in ("legacy", "residual"):
+            raise ValueError("projection must be legacy or residual")
+        if not (0.1 <= self.residual_gain <= 3.0):
+            raise ValueError("residual_gain must be in [0.1,3.0]")
+        if not self.decode_views or len(self.decode_views) != len(set(self.decode_views)) or any(
+                x not in ("bicubic", "lanczos", "bilinear") for x in self.decode_views):
+            raise ValueError("decode_views must be a comma-separated subset of bicubic,lanczos,bilinear")
         if self.capacity <= 0 or self.resize_to < 0:
             raise ValueError("Invalid wrapper settings")
         self.chunk_count = math.ceil(DATA_BITS / self.capacity)
@@ -139,12 +153,15 @@ class SpatialChunk4096:
         if len(set(self.regions)) != self.chunk_count:
             raise AssertionError("Region collision")
 
-    def _prepare(self, patch: np.ndarray) -> np.ndarray:
+    def _prepare(self, patch: np.ndarray, *, view: str = "bicubic") -> np.ndarray:
         if not self.resize_to:
             return patch.copy()
         if patch.shape[:2] == (self.resize_to, self.resize_to):
             return patch.copy()
-        return np.asarray(Image.fromarray(patch).resize((self.resize_to, self.resize_to), Image.Resampling.BICUBIC), dtype=np.uint8)
+        modes = {"bicubic": Image.Resampling.BICUBIC,
+                 "lanczos": Image.Resampling.LANCZOS,
+                 "bilinear": Image.Resampling.BILINEAR}
+        return np.asarray(Image.fromarray(patch).resize((self.resize_to, self.resize_to), modes[view]), dtype=np.uint8)
 
     @staticmethod
     def _restore(img: np.ndarray, size: tuple[int, int]) -> np.ndarray:
@@ -166,7 +183,20 @@ class SpatialChunk4096:
             encoded = np.asarray(encoded)
             if encoded.ndim != 3 or encoded.shape[-1] != 3:
                 raise ValueError(f"Unexpected native image shape for chunk {i}: {encoded.shape}")
-            output[y0:y1, x0:x1] = self._restore(np.clip(encoded, 0, 255).astype(np.uint8), (y1-y0, x1-x0))
+            encoded_small = self._restore(np.clip(encoded, 0, 255).astype(np.uint8),
+                                          (y1-y0, x1-x0))
+            if self.projection == "legacy":
+                output[y0:y1, x0:x1] = encoded_small
+            else:
+                # Project only TrustMark's embedded change back to the true
+                # small host patch; do NOT replace natural high-frequency host
+                # content with the twice-resized patch. One fixed global gain.
+                original_small = host[y0:y1, x0:x1].astype(np.float32)
+                resized_source = self._restore(source, (y1-y0, x1-x0)).astype(np.float32)
+                residual = encoded_small.astype(np.float32) - resized_source
+                output[y0:y1, x0:x1] = np.clip(
+                    np.rint(original_small + self.residual_gain * residual), 0, 255
+                ).astype(np.uint8)
         return output
 
     def detect(self, image: np.ndarray) -> Recovered:
@@ -179,41 +209,65 @@ class SpatialChunk4096:
         rejected = 0
         exceptions = 0
         invalid = 0
+        fallback = 0
         for i, (y0, y1, x0, x1) in enumerate(self.regions):
-            try:
-                patch = self._prepare(image[y0:y1, x0:x1])
-                decoded, present = self.native.detect(patch)
-                if decoded is None or present is False:
-                    errors.append(f"chunk {i}: decoder rejected or returned no message")
-                    rejected += 1
-                    continue
-                v = np.asarray(decoded, dtype=np.uint8).reshape(-1)
-                if v.size != self.capacity or not np.isin(v, (0, 1)).all():
-                    errors.append(f"chunk {i}: invalid decoded payload")
+            # A failed BCH validation is an erasure. Only a fully validated
+            # native decode contributes bits. Optional resampling views are
+            # deterministic and identical for every attack/host.
+            accepted = False
+            had_error = False
+            had_invalid = False
+            for view_index, view in enumerate(self.decode_views):
+                try:
+                    patch = self._prepare(image[y0:y1, x0:x1], view=view)
+                    decoded, present = self.native.detect(patch)
+                    if decoded is None or present is not True:
+                        continue
+                    v = np.asarray(decoded, dtype=np.uint8).reshape(-1)
+                    if v.size != self.capacity or not np.isin(v, (0, 1)).all():
+                        had_invalid = True
+                        continue
+                    a, b = i*self.capacity, (i+1)*self.capacity
+                    recovered[a:b] = v
+                    valid[a:b] = True
+                    good += 1
+                    if view_index:
+                        fallback += 1
+                    accepted = True
+                    break
+                except Exception as exc:
+                    had_error = True
+                    errors.append(f"chunk {i} view {view}: {type(exc).__name__}: {exc}")
+            if not accepted:
+                if had_invalid:
                     invalid += 1
-                    continue
-                a, b = i*self.capacity, (i+1)*self.capacity
-                recovered[a:b] = v
-                valid[a:b] = True
-                good += 1
-            except Exception as exc:
-                errors.append(f"chunk {i}: {type(exc).__name__}: {exc}")
-                exceptions += 1
+                    errors.append(f"chunk {i}: invalid decoded payload")
+                elif had_error:
+                    exceptions += 1
+                else:
+                    rejected += 1
+                    errors.append(f"chunk {i}: native decoder rejected all views")
         return Recovered(recovered[:DATA_BITS], valid[:DATA_BITS], good, self.chunk_count,
-                         errors, rejected, exceptions, invalid)
+                         errors, rejected, exceptions, invalid, fallback)
 
     @property
     def layout_bytes(self) -> int:
         """Public fixed layout needs no per-image position map; include config bytes."""
         return len(json.dumps({"cols":self.cols, "count":self.chunk_count,
-                               "native_bits":self.capacity,"resize":self.resize_to},
+                               "native_bits":self.capacity,"resize":self.resize_to,
+                               "projection":self.projection,"residual_gain":self.residual_gain,
+                               "decode_views":self.decode_views},
                               sort_keys=True).encode())
 
 
-def make_wrapper(method: str, *, resize_to: int = 256, device: str = "auto", model_type: str = "Q") -> SpatialChunk4096:
+def make_wrapper(method: str, *, resize_to: int = 256, device: str = "auto", model_type: str = "Q",
+                 wm_strength: float = 1.0, projection: str = "legacy",
+                 residual_gain: float = 1.0, decode_views: str = "bicubic") -> SpatialChunk4096:
     if method == "trustmark":
-        return SpatialChunk4096(TrustMarkAdapter(model_type=model_type, device=device),
-                                name="trustmark_4096_spatial", cols=8, resize_to=resize_to)
+        return SpatialChunk4096(TrustMarkAdapter(model_type=model_type, device=device, wm_strength=wm_strength),
+                                name="trustmark_4096_spatial", cols=8, resize_to=resize_to,
+                                projection=projection, residual_gain=residual_gain,
+                                decode_views=decode_views)
     if method == "wam":
         return SpatialChunk4096(WAMAdapter(device=device), name="wam_4096_spatial",
                                 cols=8, resize_to=resize_to)
@@ -255,6 +309,7 @@ def _metrics(truth: np.ndarray, rec: Recovered) -> dict:
             "exception_chunks":rec.exception_chunks,
             "invalid_chunks":rec.invalid_chunks,
             "missing_chunks":max(0, rec.chunks-rec.good_chunks),
+            "fallback_chunks":rec.fallback_chunks,
             "erasure_notes":" | ".join(rec.errors[:3]) + (f" (+{len(rec.errors)-3} more)" if len(rec.errors)>3 else ""),
             "error":""}
 
@@ -273,7 +328,9 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
         resize_to: int = 256, device: str = 'auto', model_type: str = 'Q',
         max_clean_ber: float = .05, min_clean_coverage: float = .95,
         force_full: bool = False, save_images: bool = False,
-        binary_channel: str = 'luma', wrapper_factory: Callable[[str], SpatialChunk4096] | None = None) -> list[dict]:
+        binary_channel: str = 'luma', wrapper_factory: Callable[[str], SpatialChunk4096] | None = None,
+        wm_strength: float = 1.0, projection: str = "legacy",
+        residual_gain: float = 1.0, decode_views: str = "bicubic") -> list[dict]:
     """Run all attacks on ONE complete marked host, with per-host resume.
 
     For full testing, host_dir must be the existing held-out split directory;
@@ -292,12 +349,16 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
                 'watermark_sha256':hashlib.sha256(Path(watermark).read_bytes()).hexdigest(),
                 'methods':list(methods),'hosts':[x.name for x in hosts],
                 'attacks':[x.name for x in cases],'attack_preset':attack_preset,
-                'config':{'resize_to':resize_to,'max_clean_ber':max_clean_ber,'binary_channel':binary_channel,
+                'config':{'resize_to':resize_to,'wm_strength':wm_strength,
+                          'projection':projection,'residual_gain':residual_gain,'decode_views':decode_views,
+                          'max_clean_ber':max_clean_ber,'binary_channel':binary_channel,
                           'min_clean_coverage':min_clean_coverage,'force_full':force_full},
                 'python':platform.python_version(), 'numpy':np.__version__,
                 'warning':'Matched 4096-bit source watermark, NOT native 4096-bit pretrained-model capacity. Full clean extraction is not guaranteed.'}
     for method in methods:
-        wrapper = wrapper_factory(method) if wrapper_factory else make_wrapper(method,resize_to=resize_to,device=device,model_type=model_type)
+        wrapper = wrapper_factory(method) if wrapper_factory else make_wrapper(method,resize_to=resize_to,device=device,model_type=model_type,
+                                   wm_strength=wm_strength,projection=projection,
+                                   residual_gain=residual_gain,decode_views=decode_views)
         for host_path in hosts:
             per_host = output / method / (host_path.stem + '_results.csv')
             sidecar = output / method / (host_path.stem + '_config.json')
@@ -305,7 +366,10 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
                 "host_sha256":hashlib.sha256(host_path.read_bytes()).hexdigest(),
                 "watermark_sha256":manifest["watermark_sha256"], "binary_channel":binary_channel,
                 "method":method,"native_capacity":wrapper.capacity,"region_cols":wrapper.cols,
-                "resize_to":wrapper.resize_to,"attacks":[c.name for c in cases],
+                "resize_to":wrapper.resize_to,
+                "wm_strength":wm_strength,"projection":wrapper.projection,
+                "residual_gain":wrapper.residual_gain,"decode_views":list(wrapper.decode_views),
+                "attacks":[c.name for c in cases],
                 "device":device,"model_type":model_type,"force_full":force_full,
                 "save_images":save_images,
                 "implementation_sha256":hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -467,7 +531,7 @@ def run(*, host_dir: Path, watermark: Path, output: Path, methods: tuple[str, ..
         row={'method_id':name,'phase':phase,'n':len(grp),
              'failure_aware_protocol':'erased_chunks_count_as_errors; conditional_NC_excludes_erasures; full_NC_defined_only_at_100pct_coverage'}
         for k in ('psnr','ssim','nc','ncc','ber','nc_zero_fill','ncc_zero_fill','ber_erasure_as_error','fraction_correct_all_bits','nc_full_coverage','bit_coverage',
-                  'exact_recovery','decoded_chunks','rejected_chunks','exception_chunks','invalid_chunks',
+                  'exact_recovery','decoded_chunks','rejected_chunks','exception_chunks','invalid_chunks','fallback_chunks',
                   'embedding_time_sec','extraction_time_sec'):
             row[k+'_mean']=float(pd.to_numeric(grp[k],errors='coerce').mean())
         summaries.append(row)
@@ -510,6 +574,14 @@ def main(argv=None):
     p.add_argument('--max-attacks',type=int,default=0)
     p.add_argument('--max-images',type=int)
     p.add_argument('--resize-to',type=int,default=256)
+    p.add_argument('--wm-strength',type=float,default=1.0,
+                   help='Official TrustMark WM_STRENGTH at encode, 1.0 reproduces original')
+    p.add_argument('--projection',choices=['legacy','residual'],default='legacy',
+                   help='Residual projects watermark change without blurring original host patch')
+    p.add_argument('--residual-gain',type=float,default=1.0,
+                   help='Global residual multiplier, only used with --projection residual')
+    p.add_argument('--decode-views',default='bicubic',
+                   help='Comma-separated deterministic resampling: bicubic,lanczos,bilinear')
     p.add_argument('--device',default='auto')
     p.add_argument('--model-type',default='Q')
     p.add_argument('--max-clean-ber',type=float,default=.05)
@@ -524,7 +596,9 @@ def main(argv=None):
         attack_preset=a.attack_preset,max_attacks=a.max_attacks,max_images=a.max_images,
         resize_to=a.resize_to,device=a.device,model_type=a.model_type,
         max_clean_ber=a.max_clean_ber,min_clean_coverage=a.min_clean_coverage,
-        force_full=a.force_full,save_images=a.save_images,binary_channel=a.binary_channel)
+        force_full=a.force_full,save_images=a.save_images,binary_channel=a.binary_channel,
+        wm_strength=a.wm_strength,projection=a.projection,
+        residual_gain=a.residual_gain,decode_views=a.decode_views)
 
 
 if __name__=='__main__': main()
