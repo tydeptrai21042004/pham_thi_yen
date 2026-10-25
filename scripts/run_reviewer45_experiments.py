@@ -18,7 +18,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from watermarklab.common.attack import reviewer45_attack_suite, manuscript43_attack_suite, reviewer45_family
-from watermarklab.common.io_utils import list_image_files
+from watermarklab.common.io_utils import list_image_files, load_watermark_binary
+from watermarklab.experiments.splits import TRAIN_NAMES, ORIGINAL_TEST_NAMES, _validate_folder, _validate_image
 
 
 def protocol_manifest(output_dir: Path) -> str:
@@ -113,8 +114,8 @@ def run_main(args: list[str], dry_run: bool):
 def build_cli():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["evaluate", "sweep", "manifest"], default="evaluate")
-    parser.add_argument("--test-hosts", type=Path, help="Held-out hosts for evaluate")
-    parser.add_argument("--train-hosts", type=Path, help="Training hosts for sweep (MUST differ from test)")
+    parser.add_argument("--test-hosts", type=Path, default=ROOT / "data/host", help="Exact 12 held-out test hosts; Lena excluded")
+    parser.add_argument("--train-hosts", type=Path, default=ROOT / "data/host_train", help="Exact 9 tuning hosts, disjoint from test")
     parser.add_argument("--watermark-w1", type=Path, default=Path("data/watermark/wm.png"))
     parser.add_argument("--watermark-w2", type=Path, default=Path("data/watermark/Cc.logo.circle.png"))
     parser.add_argument("--output", type=Path, default=Path("results/reviewer45_v1"))
@@ -140,25 +141,66 @@ def main():
     print("reviewer45 protocol SHA256:", sha)
     if args.mode == "manifest":
         return
-    if args.mode == "evaluate" and (args.test_hosts is None or not args.test_hosts.is_dir()):
-        raise ValueError("--test-hosts must point to an existing held-out host directory")
-    if args.mode == "sweep" and (args.train_hosts is None or not args.train_hosts.is_dir()):
-        raise ValueError("--train-hosts must point to an existing training host directory")
-    if args.train_hosts and args.test_hosts and args.train_hosts.resolve() == args.test_hosts.resolve():
+    if args.train_hosts.resolve() == args.test_hosts.resolve():
         raise ValueError("Training and testing host directories must be different")
+    # Validate BOTH named groups in EVERY paper run. Never optimize on test hosts.
+    train_paths = _validate_folder(args.train_hosts, TRAIN_NAMES, "train")
+    test_paths = _validate_folder(args.test_hosts, ORIGINAL_TEST_NAMES, "test")
+    assert len(train_paths) == 9 and len(test_paths) == 12
+    decoded_hashes = [_validate_image(path) for path in train_paths + test_paths]
+    if len(set(decoded_hashes)) != 21:
+        raise ValueError("Train/test contains duplicate decoded host images")
+    # The common image enumerator excludes Lena/Lenna, even if data/host
+    # still retains that old file. This is the frozen manuscript host list.
+    if {p.name.casefold() for p in list_image_files(args.test_hosts)} != {
+        x.casefold() for x in ORIGINAL_TEST_NAMES
+    }:
+        raise ValueError("Benchmark enumeration differs from frozen 12-host manifest")
+    watermarks = {}
+    for label, wp in (("W1", args.watermark_w1), ("W2", args.watermark_w2)):
+        if not wp.is_file():
+            raise FileNotFoundError(wp)
+        pixels = load_watermark_binary(wp)
+        watermarks[label] = {"path": str(wp.resolve()),
+                              "file_sha256": hashlib.sha256(wp.read_bytes()).hexdigest(),
+                              "binary_sha256": hashlib.sha256(pixels.tobytes()).hexdigest(),
+                              "size": [64,64], "source_bits": 4096,
+                              "white_bits": int((pixels > 0).sum())}
+    if watermarks["W1"]["binary_sha256"] == watermarks["W2"]["binary_sha256"]:
+        raise ValueError("W1 and W2 decode to identical binary images")
+    (args.output / "frozen_input_manifest.json").write_text(json.dumps({
+        "train_count": 9, "test_count": 12, "train_files": [p.name for p in train_paths],
+        "test_files": [p.name for p in test_paths], "excluded": ["lena.bmp", "lenna.bmp"],
+        "train_sha256_pixels": dict(zip((p.name for p in train_paths), decoded_hashes[:9])),
+        "test_sha256_pixels": dict(zip((p.name for p in test_paths), decoded_hashes[9:])),
+        "watermarks": watermarks,
+        "proposal_optimizer_objective": "UNMODIFIED_FROM_SOURCE",
+    }, indent=2) + "\n", encoding="utf8")
+    if args.mode == "evaluate" and args.proposal_param_mode == "require" and not args.dry_run:
+        # Never accept an old optimization file produced using test images.
+        optimized_path = Path(args.proposal_param_file)
+        if not optimized_path.is_file():
+            raise FileNotFoundError(f"Nine-host frozen optimization file is missing: {optimized_path}")
+        try:
+            fitted = json.loads(optimized_path.read_text(encoding="utf8"))
+        except (ValueError, OSError) as exc:
+            raise RuntimeError("Cannot read frozen optimization provenance") from exc
+        expected_train = {Path(name).stem.casefold() for name in TRAIN_NAMES}
+        if fitted.get("format") != "watermarklab_proposal_optimization_params_v1":
+            raise RuntimeError("Frozen final comparison requires a benchmark-generated optimization file with 9-host provenance")
+        fitted_names = {Path(name).stem.casefold() for name in fitted.get("per_image", {})}
+        if fitted_names != expected_train:
+            raise RuntimeError(f"Optimization was not completed on exactly 9 training hosts: {sorted(fitted_names)}")
+        fitted_host_dir = Path(fitted.get("host_dir", ""))
+        if not fitted_host_dir.is_dir():
+            raise RuntimeError(f"Missing optimization source host directory: {fitted_host_dir}")
+        fitted_source_names = _validate_folder(fitted_host_dir, TRAIN_NAMES, "train")
+        if [_validate_image(x) for x in fitted_source_names] != decoded_hashes[:9]:
+            raise RuntimeError("Frozen optimizer provenance uses different training image pixels")
     if not args.dry_run:
         assert_pywt(args.allow_fallback)
         if not args.allow_fallback:
             os.environ["WATERMARKLAB_STRICT_PYWT"] = "1"
-    # A 12-host paper experiment must be a clean held-out folder; a repository
-    # directory containing Lenna/Lena and 12 others must not be silently used.
-    if args.mode == "evaluate" and not args.dry_run and args.max_images is None:
-        host_paths = list_image_files(args.test_hosts)
-        bad = [p.name for p in host_paths if p.stem.lower() in {"lena", "lenna"}]
-        if bad or len(host_paths) != 12:
-            raise ValueError(f"Paper run requires exactly 12 held-out hosts (excluding Lena/Lenna); "
-                             f"found {len(host_paths)} files and excluded names {bad}. "
-                             "Use a separate test12 directory, or --max-images for diagnostics only.")
     for label,wm in (("W1",args.watermark_w1),("W2",args.watermark_w2)):
         if not wm.is_file():
             raise FileNotFoundError(wm)

@@ -51,7 +51,9 @@ def nc(a, b) -> float:
     vb = to_bits(b).astype(np.float64)
     den = np.linalg.norm(va) * np.linalg.norm(vb)
     if den == 0:
-        return 1.0 if np.array_equal(va, vb) else 0.0
+        # The published normalized-dot-product metric is mathematically
+        # undefined for zero-norm input; never report perfect detection.
+        return float("nan")
     return float(np.clip(np.dot(va, vb) / den, -1.0, 1.0))
 
 
@@ -62,7 +64,9 @@ def ncc(a, b) -> float:
     vb = vb - vb.mean()
     den = np.linalg.norm(va) * np.linalg.norm(vb)
     if den == 0:
-        return 1.0 if np.array_equal(va, vb) else 0.0
+        # The published normalized-dot-product metric is mathematically
+        # undefined for zero-norm input; never report perfect detection.
+        return float("nan")
     return float(np.clip(np.dot(va, vb) / den, -1.0, 1.0))
 
 

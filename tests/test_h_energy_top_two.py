@@ -1,4 +1,4 @@
-"""One strongest main-diagonal and one strongest subdiagonal H position."""
+"""Fixed 4x4 h22/h21 proposal with separate larger-block size ablations."""
 
 import numpy as np
 import pytest
@@ -14,13 +14,16 @@ from watermarklab.methods.proposal_qh_dwt_hess import (
 def test_groupwise_diagonal_and_subdiagonal_energy_maxima(n):
     for seed in range(4):
         block = np.random.default_rng(n * 10 + seed).normal(size=(n, n))
-        H = hessenberg(block, calc_q=False)
-        diagonal_best = min((-float(H[r,r])**2, r, r) for r in range(n))
-        subdiagonal_best = min((-float(H[r,r-1])**2, r, r-1) for r in range(1,n))
         actual = _rank_hpos_by_energy(block)
         assert len(actual) == 2
-        assert [p for _,p in actual] == [(diagonal_best[1], diagonal_best[2]),
-                                         (subdiagonal_best[1], subdiagonal_best[2])]
+        if n == 4:
+            assert actual == (("h22", (1,1)), ("h21", (1,0)))
+        else:
+            H = hessenberg(block, calc_q=False)
+            diagonal_best = min((-float(H[r,r])**2, r, r) for r in range(n))
+            subdiagonal_best = min((-float(H[r,r-1])**2, r, r-1) for r in range(1,n))
+            assert [p for _,p in actual] == [(diagonal_best[1], diagonal_best[2]),
+                                             (subdiagonal_best[1], subdiagonal_best[2])]
         assert actual[0][1][0] == actual[0][1][1]
         assert actual[1][1][0] == actual[1][1][1] + 1
         for _, pos in actual:
@@ -30,16 +33,16 @@ def test_groupwise_diagonal_and_subdiagonal_energy_maxima(n):
 
 
 def test_global_top_two_are_not_used():
-    # A diagonal input has 2 dominant DIAGONAL coefficients. The group-wise
-    # policy must still nominate one first-subdiagonal coefficient.
+    # Even if other diagonal elements carry more energy, the manuscript
+    # fixes the 4x4 candidates at h22 and h21.
     block = np.diag([99.0, 2.0, 85.0, 1.0])
     selected = _rank_hpos_by_energy(block)
-    assert [p for _,p in selected] == [(0, 0), (1, 0)]
+    assert [p for _,p in selected] == [(1, 1), (1, 0)]
     assert selected[1][1] != (2, 2)
 
 
 def test_paper_like_h21_h22_is_possible():
-    # The exact paper pair is an example, not a hard-coded location.
+    # The exact paper pair is hard-coded in the primary 4x4 algorithm.
     block = np.array([[0., 1., 2., 3.],
                       [20., 100., 4., 5.],
                       [0., 2., 3., 6.],
@@ -94,7 +97,7 @@ def test_invalid_absolute_positions_rejected_but_legacy_keys_decodable(n):
 def test_tie_breaker_prefers_top_left_and_pre_watermark_is_identical():
     block = np.zeros((4,4),dtype=float)
     first = _rank_hpos_by_energy(block)
-    assert [p for _,p in first] == [(0,0),(1,0)]
+    assert [p for _,p in first] == [(1,1),(1,0)]
     assert first == _rank_hpos_by_energy(block.copy())
 
 
@@ -110,7 +113,11 @@ def test_end_to_end_uses_absolute_H_locations_and_records_energy_policy(n):
     extracted = model.extract(image, key)
     assert image.shape == host.shape
     assert extracted.shape == watermark.shape
-    assert key.payload_meta['h_candidate_policy'] == 'per_block_best_diagonal_and_subdiagonal_H_energy'
+    assert key.payload_meta['h_candidate_policy'] == (
+        'fixed_h22_h21_independent_H_competition' if n == 4
+        else 'size_ablation_group_energy_independent_H')
+    if n == 4:
+        assert key.payload_meta['h_candidates'] == ['h22', 'h21']
     assert key.payload_meta['h_grouped_candidate_count'] == 2
     assert key.payload_meta['candidate_competition'] == 'Q_vs_independent_H_main_diagonal_vs_independent_H_first_subdiagonal'
     assert sum(key.payload_meta['h_group_selected'].values()) == key.payload_meta['hpos_used']
@@ -119,6 +126,8 @@ def test_end_to_end_uses_absolute_H_locations_and_records_energy_policy(n):
     assert active, 'H-only run should embed at least one bit'
     assert all(i >= 2 for i in active)
     assert all((lambda rc: rc[0] in (rc[1], rc[1]+1))(_decode_hpos(i,n)) for i in active)
+    if n == 4:
+        assert all(_decode_hpos(i,n) in ((1,1),(1,0)) for i in active)
     assert not key.embedding_errors
 
 

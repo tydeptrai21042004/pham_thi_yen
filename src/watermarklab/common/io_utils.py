@@ -40,7 +40,10 @@ def load_watermark_binary(path: str | Path, size: int = WM_SIZE, threshold: int 
         img = _alpha_composite_rgba_on_white(img)
     else:
         img = img.convert("RGB")
-    img = img.resize((size, size), Image.Resampling.NEAREST).convert("L")
+    if img.size != (size, size):
+        raise ValueError(f"Watermark must be exactly {size}x{size}; got {img.size} for {path}. "
+                         "Automatic resizing is prohibited in the frozen W1/W2 comparison.")
+    img = img.convert("L")
     arr = np.asarray(img, dtype=np.uint8)
     out = np.where(arr >= threshold, 255, 0).astype(np.uint8)
     if invert:
@@ -60,7 +63,10 @@ def save_image(path: str | Path, arr: np.ndarray) -> None:
         raise ValueError(f"Unsupported image shape for saving: {arr.shape}")
 
 
-def list_image_files(folder: str | Path) -> list[Path]:
+def list_image_files(folder: str | Path, *, exclude_lena: bool = True) -> list[Path]:
+    """List inputs; Lena/Lenna are excluded from all benchmark defaults."""
     folder = Path(folder)
     exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
-    return sorted([p for p in folder.iterdir() if p.suffix.lower() in exts])
+    return sorted([p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in exts
+                   and (not exclude_lena or p.stem.casefold() not in {"lena", "lenna"})],
+                  key=lambda p: p.name.casefold())

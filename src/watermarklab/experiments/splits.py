@@ -24,7 +24,7 @@ ORIGINAL_TEST_NAMES = (
     "sailboat.bmp", "tiffany.bmp",
 )
 PREVIOUS_TUNING_NAMES = ("baboon.bmp", "safari.bmp", "sailboat.bmp")
-EXCLUDED = {"lenna.bmp"}
+EXCLUDED = {"lenna.bmp", "lena.bmp"}
 
 
 def _validate_folder(directory: Path, expected_names: tuple[str, ...], label: str) -> list[Path]:

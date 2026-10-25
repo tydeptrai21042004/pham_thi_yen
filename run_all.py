@@ -22,18 +22,20 @@ if __name__ == "__main__":
     if not optimized.get("loaded"):
         print("WARNING: no parameters tuned on the nine new training images. "
               "Output is an untuned functional check, not a final held-out comparison.")
-    run_benchmark(
-        host_dir=split["test_dir"],
-        watermark_path=root / "data/watermark/wm.png",
-        output_dir=root / "results/common_benchmark",
-        selected_methods=["all"],
-        max_images=None,
-        save_outputs=True,
-        attack_preset="lite",
-        proposal_options={
-            "params": {"repeat": None, "dwt_mode": "pywt"},
-            "use_optimizer": False,
-            "optimized_payload": optimized if optimized.get("loaded") else None,
-        },
-    )
-    print("Done. See results/common_benchmark/compare_psnr_nc_ber_ncc_before_after_attack.csv")
+    for label, wm_name in (("W1", "wm.png"), ("W2", "Cc.logo.circle.png")):
+        run_benchmark(
+            host_dir=split["test_dir"],
+            watermark_path=root / "data/watermark" / wm_name,
+            output_dir=root / "results/common_benchmark" / label,
+            selected_methods=["all"],
+            max_images=None,
+            save_outputs=True,
+            attack_preset="lite",
+            proposal_options={
+                "params": {"repeat": None, "dwt_mode": "pywt"},
+                "use_optimizer": False,
+                "optimized_payload": optimized if optimized.get("loaded") else None,
+            },
+        )
+    print("Functional-check output: results/common_benchmark/W1 and W2. "
+          "For the final 45-attack manuscript evaluation use scripts/run_reviewer45_experiments.py.")

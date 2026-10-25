@@ -73,9 +73,10 @@ Q4_GIVENS_FINE_STEPS = 0
 Q4_GIVENS_PASSES = 1
 Q4_GIVENS_MSE_WEIGHT = 0.10
 Q4_GIVENS_EXTRA_MARGIN_WEIGHT = 0.04
-# (1,2) is intentionally excluded: rotating those two rows preserves
-# q[1,1]**2 + q[2,1]**2 and cannot change the Q-branch decision statistic.
-Q4_GIVENS_PAIRS = ((0, 2), (1, 3), (0, 1))
+# The four manuscript row pairs (1-based): (1,3), (2,4), (1,2), (2,3).
+# (2,3) is retained in the declared list but skipped in the search below:
+# rotating those rows preserves q[1,1]**2 + q[2,1]**2.
+Q4_GIVENS_PAIRS = ((0, 2), (1, 3), (0, 1), (1, 2))
 
 FAST_CANDIDATE_SCORING = True
 USE_STRUCTURED_REPETITION = True
@@ -801,21 +802,19 @@ def _candidate_is_strong_enough(cand: dict, params: ProposalParams) -> bool:
 
 
 def _rank_hpos_by_energy(block0: np.ndarray) -> tuple[tuple[str, tuple[int, int]], ...]:
-    """Return two *group-wise* Hessenberg energy maxima, not global Top-2.
+    """Use exactly h22 and h21 for the manuscript's 4x4 method.
 
-    One candidate comes from the main diagonal H[i,i]; the other comes from
-    the legal lower half of an upper-Hessenberg matrix, its first subdiagonal
-    H[i,i-1]. This corresponds to the manuscript's h22-versus-h21 distinction.
-    The two positions are selected before seeing the watermark bit, using
-    the *original* block.  Each group's ties break toward the smallest row.
-    Each group maximum is independently embedded and scored; the final
-    selector can compare both H candidates directly against the Q candidate.
-    Works at block sizes 4, 8, and 16.
+    The manuscript fixes P_H={h22,h21} for 4x4 blocks; do not search all
+    diagonal/subdiagonal elements in that primary configuration.
+    For the separate 8x8/16x16 size ablations, retain the preexisting
+    strongest-per-group extension and label it as such in saved metadata.
     """
     block = np.asarray(block0, dtype=np.float64)
     n = int(block.shape[0])
     if block.shape != (n, n) or n not in (4, 8, 16):
         raise ValueError("H energy ranking requires a square 4, 8 or 16 block")
+    if n == 4:
+        return (("h22", (1, 1)), ("h21", (1, 0)))
     H = hessenberg(block, calc_q=False)
 
     def strongest(group: list[tuple[int, int]]) -> tuple[str, tuple[int, int]]:
@@ -1158,7 +1157,8 @@ class ProposalQHDWTHess:
                 "total_flags": int(len(flags)),
                 "parameter_snapshot": _to_json_safe(params.to_dict()),
                 "block_hash": "SHA-256",
-                "h_candidates": ["best_main_diagonal_energy", "best_first_subdiagonal_energy"],
+                "h_candidates": (["h22", "h21"] if bs == 4 else
+                                 ["best_main_diagonal_energy", "best_first_subdiagonal_energy"]),
                 "candidate_competition": ("H_min_MSE_then_Q_vs_H" if params.h_selection_policy == "manuscript"
                                           else "Q_vs_independent_H_main_diagonal_vs_independent_H_first_subdiagonal"),
                 "h_selection_policy": str(params.h_selection_policy),
@@ -1172,13 +1172,18 @@ class ProposalQHDWTHess:
             }
         )
 
-        wm_meta["h_candidate_policy"] = ("manuscript_lowest_MSE_eligible_H_then_Q_competition"
-                                          if params.h_selection_policy == "manuscript"
-                                          else "per_block_best_diagonal_and_subdiagonal_H_energy")
-        wm_meta["h_energy_definition"] = "squared_H_coefficient_magnitude"
+        wm_meta["h_candidate_policy"] = (
+            "fixed_h22_h21_lowest_MSE_eligible_H_then_Q" if bs == 4 and params.h_selection_policy == "manuscript"
+            else "fixed_h22_h21_independent_H_competition" if bs == 4
+            else "size_ablation_group_energy_min_MSE_H_then_Q" if params.h_selection_policy == "manuscript"
+            else "size_ablation_group_energy_independent_H"
+        )
+        wm_meta["h_energy_definition"] = ("fixed_manuscript_positions" if bs == 4 else
+                                          "squared_H_coefficient_magnitude")
         wm_meta["h_position_encoding"] = "2 + 16 * row + column (zero based)"
         wm_meta["h_grouped_candidate_count"] = 2
         wm_meta["h_candidate_groups"] = ["main_diagonal", "first_subdiagonal"]
+        wm_meta["h_4x4_manuscript_positions"] = ["h22", "h21"]
 
         key = ProposalKey(
             flags=[int(x) for x in flags],
