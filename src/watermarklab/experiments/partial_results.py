@@ -39,12 +39,45 @@ def image_hash(image: np.ndarray) -> str:
 
 
 def _valid_row(row: Any, numerical: tuple[str, ...]) -> bool:
+    """A completed extraction may have undefined NC/NCC, but never undefined BER.
+
+    The decoder's all-zero payload makes normalized correlation undefined.
+    Preserve that outcome as missing correlation (not numeric zero or one), while
+    still allowing a fully measured attack to be resumed from its checkpoint.
+    """
     if not isinstance(row, dict):
         return False
     try:
-        return all(math.isfinite(float(row[name])) for name in numerical)
+        for name in numerical:
+            value = row[name]
+            if name in ("nc", "ncc") and (value is None or
+                                             (isinstance(value, (float, np.floating)) and math.isnan(float(value)))):
+                continue  # Completed extraction with undefined correlation; BER remains checked.
+            if not math.isfinite(float(value)):
+                return False
+        return True
     except (KeyError, TypeError, ValueError, OverflowError):
         return False
+
+
+def _strict_json_value(value: Any) -> Any:
+    """Encode all non-finite numerical measurements as JSON null, never 0/1.
+
+    This conversion affects persistent metadata ONLY, not the calculations.
+    Scientific CSVs retain their missing NC/NCC entries for reporting.
+    """
+    if isinstance(value, dict):
+        return {str(k): _strict_json_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_strict_json_value(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return _strict_json_value(value.tolist())
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    return value
 
 
 class AttackCheckpoint:
@@ -89,7 +122,8 @@ class AttackCheckpoint:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp = self.path.with_name(self.path.name + ".tmp")
         with temp.open("w", encoding="utf-8") as f:
-            json.dump(self.state, f, ensure_ascii=False, allow_nan=False, default=str)
+            json.dump(_strict_json_value(self.state), f, ensure_ascii=False,
+                      allow_nan=False, default=str)
             f.flush()
             os.fsync(f.fileno())
         os.replace(temp, self.path)

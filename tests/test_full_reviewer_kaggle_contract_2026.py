@@ -88,9 +88,13 @@ def test_single_host_phase_grid_strict(tmp_path):
     rows=[row(),row(phase='after_attack',attack='jpeg_q30'),row(phase='after_attack',attack='rotation_10deg')]
     csvfile(file,rows)
     assert mod.phase_ok(file,'proposal','host',['jpeg_q30','rotation_10deg'])
+    # Undefined correlation is a completed extraction, not a missing attack.
+    accepted=[rows[0],{**rows[1], 'nc':'nan'},rows[2]]
+    csvfile(file,accepted)
+    assert mod.phase_ok(file,'proposal','host',['jpeg_q30','rotation_10deg'])
     for broken in (rows[:-1],rows+[rows[0]],
                    [rows[0],rows[1],row(phase='after_attack',attack='other')],
-                   [rows[0],{**rows[1], 'nc':'nan'},rows[2]],
+                   [rows[0],{**rows[1], 'ber':'nan'},rows[2]],
                    [rows[0],{**rows[1], 'method_id':'wrong'},rows[2]],
                    [rows[0],{**rows[1], 'image':'test_other'},rows[2]]):
         csvfile(file,broken)

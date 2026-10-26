@@ -103,12 +103,26 @@ def phase_ok(csv_path: Path, method: str, image: str, attack_names: list[str]) -
     for row in rows:
         if row.get('method_id') != method or row.get('image') != image:
             return False
-        for col in ('psnr', 'ssim', 'nc', 'ber', 'embed_time_sec', 'extract_time_sec'):
+        # Undefined normalized correlation is a measured decoder outcome,
+        # NOT an unexecuted attack and NOT a successful match. BER must remain finite.
+        for col in ('psnr', 'ssim', 'ber', 'embed_time_sec', 'extract_time_sec'):
             try:
-                import math
                 if not math.isfinite(float(row.get(col, ''))):
                     return False
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                return False
+        for col in ('nc', 'ncc'):
+            if col not in row:
+                if col == 'ncc':
+                    continue  # Older CSVs can lack NCC; never infer a value.
+                return False
+            val = str(row[col]).strip().lower()
+            if val in ('nan', '', 'none', 'null'):
+                continue  # An explicitly undefined correlation; never replace with zero.
+            try:
+                if not math.isfinite(float(val)):
+                    return False
+            except (TypeError, ValueError, OverflowError):
                 return False
     return True
 
@@ -180,6 +194,16 @@ def main(argv=None):
     ap.add_argument('--task-timeout', type=int, default=11000, help='Per-job limit; optimize progress survives timeout')
     ap.add_argument('--include-neural', action='store_true', help='Deprecated unsafe/ambiguous name; use --include-neural4096 instead')
     ap.add_argument('--checkpoint-seconds', type=int, default=600, help='Periodic snapshots during long jobs')
+    ap.add_argument('--reviewer-attack-preset', default='reviewer_stress',
+                    help='Reviewer attack grid; reviewer45 gives 45 attacks for block/channel/ablation/BSS')
+    ap.add_argument('--reviewer-max-attacks', type=int, default=7,
+                    help='Reviewer 45 protocol: set to 45 (security uses a separate 7-attack negative-control set)')
+    ap.add_argument('--reviewer-kinds', default='all',
+                    help='Comma-separated independent reviewer groups: ablation,channel,audit,bss,block')
+    ap.add_argument('--heldout-methods', default='all',
+                    help='Comma-separated methods to evaluate (default: all 13)')
+    ap.add_argument('--heldout-hosts', default='all',
+                    help='Comma-separated host stems for selective reruns (default: all 12)')
     args = ap.parse_args(argv)
     if args.proposal_fireflies < 1 or args.proposal_generations < 1:
         ap.error('--proposal-fireflies and --proposal-generations must be positive integers')
@@ -380,8 +404,18 @@ def main(argv=None):
             blockers.append('Optimization incomplete: no validated frozen parameter file')
             return False
         jobs = []
-        for method in DEFAULT_METHOD_IDS:
-            for host in sorted(test.glob('*.bmp')):
+        allowed_methods = (list(DEFAULT_METHOD_IDS) if args.heldout_methods == 'all'
+                           else [x.strip() for x in args.heldout_methods.split(',') if x.strip()])
+        if not allowed_methods or len(set(allowed_methods)) != len(allowed_methods) or any(m not in DEFAULT_METHOD_IDS for m in allowed_methods):
+            raise ValueError('Unknown/duplicate method in --heldout-methods')
+        selected_hosts = sorted(test.glob('*.bmp'))
+        if args.heldout_hosts != 'all':
+            names = {x.strip() for x in args.heldout_hosts.split(',') if x.strip()}
+            if not names or not names.issubset({h.stem for h in selected_hosts}):
+                raise ValueError('Unknown --heldout-hosts; use test-image stems')
+            selected_hosts = [h for h in selected_hosts if h.stem in names]
+        for method in allowed_methods:
+            for host in selected_hosts:
                 folder=classical/'heldout_batches'/method/host.stem
                 target=folder/'per_image_attack_results.csv'
                 signature={'host':sha(host),'watermark':sha(WATERMARK),
@@ -431,6 +465,20 @@ def main(argv=None):
                 blockers.append(f'Missing/invalid experiment: {target}')
                 return False
         all_data=pd.concat([pd.read_csv(target) for target,_ in jobs],ignore_index=True)
+        subset = set(allowed_methods) != set(DEFAULT_METHOD_IDS) or len(selected_hosts) != 12
+        if subset:
+            # A deliberately partial cohort must never masquerade as complete.
+            import hashlib
+            tag=hashlib.sha256(json.dumps({'methods':allowed_methods,
+                   'hosts':[h.stem for h in selected_hosts]},sort_keys=True).encode()).hexdigest()[:12]
+            dest=classical/'heldout_selective'/tag
+            dest.mkdir(parents=True,exist_ok=True)
+            all_data.to_csv(dest/'per_image_attack_results.csv',index=False)
+            jwrite(dest/'scope.json',{'methods':allowed_methods,
+                   'hosts':[h.stem for h in selected_hosts],
+                   'complete_for_selected_scope':True,
+                   'not_a_full_13_method_comparison':True})
+            return True
         dest=classical/'heldout_full'
         dest.mkdir(exist_ok=True)
         all_data.to_csv(dest/'per_image_attack_results.csv',index=False)
@@ -445,20 +493,24 @@ def main(argv=None):
         if not prepared():
             blockers.append('Reviewer experiments require finalized proposal optimization')
             return False
-        for kind in reviewer_jobs:
+        chosen = (reviewer_jobs if args.reviewer_kinds == 'all'
+                  else tuple(x.strip() for x in args.reviewer_kinds.split(',') if x.strip()))
+        if not chosen or len(set(chosen)) != len(chosen) or any(k not in reviewer_jobs for k in chosen):
+            raise ValueError('Unknown/duplicate reviewer kind in --reviewer-kinds')
+        for kind in chosen:
             for host in sorted(test.glob('*.bmp')):
                 directory=classical/'reviewer_chunks'/kind/host.stem
                 sub=one_host(host)
                 if kind=='ablation':
                     cmd=[sys.executable,'main.py','--phase','proposal-ablation','--host-dir',sub,
                         '--watermark',WATERMARK,'--proposal-param-file',param,
-                        '--proposal-param-mode','require','--attack-preset','reviewer_stress',
+                        '--proposal-param-mode','require','--attack-preset',args.reviewer_attack_preset,
                         '--no-save-images','--output',directory]
                     required=directory/'full'/'per_image_attack_results.csv'
                 elif kind=='channel':
                     cmd=[sys.executable,'-m','watermarklab.experiments.channel_ablation','--host-dir',sub,
-                        '--watermark',WATERMARK,'--param-file',param,'--preset','reviewer_stress',
-                        '--output',directory]
+                        '--watermark',WATERMARK,'--param-file',param,'--preset',args.reviewer_attack_preset,
+                        '--max-attacks',str(args.reviewer_max_attacks),'--output',directory]
                     required=directory/'channel_ablation.csv'
                 elif kind=='audit':
                     cmd=[sys.executable,'-m','watermarklab.experiments.review_audit','--host-dir',sub,
@@ -471,16 +523,20 @@ def main(argv=None):
                 elif kind=='bss':
                     cmd=[sys.executable,'-m','watermarklab.experiments.bss_validation','--host-dir',sub,
                         '--watermark',WATERMARK,'--param-file',param,'--host-size','512',
-                        '--watermark-size','64','--max-hosts','1','--max-attacks','14',
-                        '--output',directory]
+                        '--watermark-size','64','--max-hosts','1',
+                        '--attack-preset',args.reviewer_attack_preset,
+                        '--max-attacks',str(args.reviewer_max_attacks),'--output',directory]
                     required=directory/'bss_per_host_attack.csv'
                 else:
                     cmd=[sys.executable,'-m','watermarklab.experiments.block_size_comparison','--host-dir',sub,
                         '--watermark',WATERMARK,'--param-file',param,'--block-sizes','4,8,16',
-                        '--max-hosts','1','--max-attacks','7','--output',directory]
+                        '--max-hosts','1','--attack-preset',args.reviewer_attack_preset,
+                        '--max-attacks',str(args.reviewer_max_attacks),'--output',directory]
                     required=directory/'per_case.csv'
                 guard=directory/'run_contract.json'
-                signature={'kind':kind,'host':sha(host),'watermark':sha(WATERMARK),
+                signature={'reviewer_attack_preset':args.reviewer_attack_preset,
+                           'reviewer_max_attacks':args.reviewer_max_attacks,
+                           'kind':kind,'host':sha(host),'watermark':sha(WATERMARK),
                            'proposal':sha(param),'code':sha(ROOT/'src/watermarklab/methods/proposal_qh_dwt_hess.py'),
                            'audit_code':sha(ROOT/'src/watermarklab/experiments/review_audit.py') if kind=='audit' else None,
                            'bss_code':sha(ROOT/'src/watermarklab/experiments/bss_validation.py') if kind=='bss' else None,
@@ -495,7 +551,7 @@ def main(argv=None):
                         if not rows:
                             return False
                         if kind=='ablation':
-                            attack_set={a.name for a in default_attack_suite(False,'reviewer_stress')}
+                            attack_set={a.name for a in default_attack_suite(False,args.reviewer_attack_preset)}
                             expected={('before_attack','no_attack')} | {('after_attack',a) for a in attack_set}
                             for variant in PROPOSAL_ABLATION_VARIANTS:
                                 path=directory/variant/'per_image_attack_results.csv'
@@ -509,7 +565,7 @@ def main(argv=None):
                         if kind=='audit':
                             return validate_security(directory,host.name,wrong_key_trials=8)
                         if kind=='bss':
-                            return validate_bss(directory,host.name,max_attacks=14)
+                            return validate_bss(directory,host.name,max_attacks=args.reviewer_max_attacks)
                         if kind=='block':
                             state=json.loads((directory/'manifest.json').read_text())
                             return (state.get('status')=='complete'
@@ -564,8 +620,17 @@ def main(argv=None):
                     return False
                 root.mkdir(parents=True,exist_ok=True)
                 pd.concat([pd.read_csv(p) for p in paths],ignore_index=True).to_csv(root/name,index=False)
-        subprocess.run([sys.executable,'scripts/export_reviewer_evidence.py',
-            '--results-dir',classical,'--output',classical/'reviewer_tables'],cwd=ROOT,env=env,check=True)
+        # Export multi-group tables only after ALL raw groups exist, even if
+        # reviewer groups were run independently in different sessions.
+        required_paths = [classical/'channel_ablation/channel_ablation.csv',
+                          classical/'review_audit/per_case_results.csv',
+                          classical/'bss_validation/bss_per_host_attack.csv',
+                          classical/'block_size_comparison/per_case.csv']
+        if all(path.is_file() for path in required_paths) and all(
+                (classical/'ablation'/variant/'per_image_attack_results.csv').is_file()
+                for variant in PROPOSAL_ABLATION_VARIANTS):
+            subprocess.run([sys.executable,'scripts/export_reviewer_evidence.py',
+                '--results-dir',classical,'--output',classical/'reviewer_tables'],cwd=ROOT,env=env,check=True)
         return True
 
     def reports():
