@@ -60,6 +60,8 @@ def parse_args(argv=None):
     p.add_argument('--fireflies', type=int, default=2)
     p.add_argument('--generations', type=int, default=2)
     p.add_argument('--task-timeout', type=int, default=10800)
+    p.add_argument('--focus-failed-baselines', action='store_true',
+                   help='Run only the baseline failures, channel, BSS, and pending extras; do not redo completed block/security/ablation.')
     return p.parse_args(argv)
 
 
@@ -150,7 +152,10 @@ def main(argv=None):
         return code==0
 
     def recovery_step(name, more=None, minimum=240):
-        return execute('recovery/'+name+('/'+str(more[1]) if more else ''),
+        # Never index a one-item option list (e.g. ['--extended-sensitivity']).
+        options_tag = '_'.join(str(x) for x in (more or []) if not str(x).startswith('--'))
+        job_tag = 'recovery/' + name + (('/' + options_tag) if options_tag else '')
+        return execute(job_tag,
           [sys.executable,str(recovery),'--step',name,*common,
            '--max-seconds',str(max(150,left()-120)),*(more or [])],minimum=minimum)
 
@@ -164,9 +169,20 @@ def main(argv=None):
         if not all(p.exists() for p in params):
             raise RuntimeError('Missing frozen parameters after optimizer; stop instead of using defaults')
 
+        if args.focus_failed_baselines:
+            # Run Hessenberg baselines before optional reviewer work so that CPU
+            # preemption does not once again skip the requested comparisons.
+            baseline_groups = [
+                ['--heldout-methods', 'abodena2022_lwt_dct_hess,su2016_contourlet_hess,gaata2022_dwt_hess_fwa,hess_nha2023'],
+                ['--heldout-methods', 'dwt_wht_svd_2024', '--heldout-hosts', 'Girl,milkdrop'],
+            ]
+            for selector in baseline_groups:
+                if left() >= 300:
+                    recovery_step('heldout', selector)
         # Independent reviewer studies: one failure must not suppress other groups.
-        # Priority: the manuscript's suspicious W2 block-size, then channels/BSS/security/ablation.
-        for kind in ('block','channel','bss','audit','ablation'):
+        # Previous fresh W1/W2 results already completed block, audit and ablation.
+        kinds = ('channel', 'bss') if args.focus_failed_baselines else ('block','channel','bss','audit','ablation')
+        for kind in kinds:
             if left()<300:break
             recovery_step('reviewer',['--reviewer-kinds',kind,
                       '--reviewer-attack-preset','reviewer45',
@@ -215,11 +231,11 @@ def main(argv=None):
                     print('WARNING: incomplete 45-attack baseline',method,flush=True)
 
         # Previously rejected 109-attack held-out method/host combinations only.
-        if left()>=300:
+        if not args.focus_failed_baselines and left()>=300:
             recovery_step('heldout',['--heldout-methods',','.join((
                 'abodena2022_lwt_dct_hess','su2016_contourlet_hess',
                 'gaata2022_dwt_hess_fwa','hess_nha2023'))])
-        if left()>=300:
+        if not args.focus_failed_baselines and left()>=300:
             recovery_step('heldout',['--heldout-methods','dwt_wht_svd_2024',
                                     '--heldout-hosts','Girl,milkdrop'])
 

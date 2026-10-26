@@ -51,6 +51,23 @@ def generate(out: Path):
     for name in ('gaata2022_dwt_hess_fwa','dwt_wht_svd_2024'):
         path=out/'failed45_from_scratch'/name/'per_image_attack_results.csv'
         graph('failed45_'+name+'_nc',path,'attack','nc','after_attack')
+    # A selective held-out cohort is a measured comparison ONLY within its
+    # own host/method scope. Never combine the 12-host Hessenberg subgroup
+    # with the two-host WHT subgroup or imply a complete 13-method grid.
+    for folder in sorted((classical/'heldout_selective').glob('*')):
+        scope_file = folder/'scope.json'
+        table = folder/'per_image_attack_results.csv'
+        if not scope_file.is_file():
+            continue
+        scope = json.loads(scope_file.read_text())
+        if scope.get('complete_for_selected_scope') is not True or not scope.get('not_a_full_13_method_comparison'):
+            continue
+        label = 'heldout_selective_' + folder.name
+        graph(label+'_mean_nc', table, 'method_id', 'nc', 'after_attack')
+        graph(label+'_mean_ber', table, 'method_id', 'ber', 'after_attack')
+        created.setdefault(label+'_scope', {'methods': scope.get('methods', []),
+                  'hosts': scope.get('hosts', []),
+                  'not_a_full_13_method_comparison': True})
     atomic = figures/'FIGURE_MANIFEST.json'
     atomic.write_text(json.dumps({'created':created,'missing':missing,
                                   'note':'Figures generated only from available raw measurements. NaN ignored in mean and counted explicitly. Never evidence of full baseline comparison.'},indent=2))

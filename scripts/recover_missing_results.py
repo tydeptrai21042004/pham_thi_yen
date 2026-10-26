@@ -468,7 +468,6 @@ def main(argv=None):
         subset = set(allowed_methods) != set(DEFAULT_METHOD_IDS) or len(selected_hosts) != 12
         if subset:
             # A deliberately partial cohort must never masquerade as complete.
-            import hashlib
             tag=hashlib.sha256(json.dumps({'methods':allowed_methods,
                    'hosts':[h.stem for h in selected_hosts]},sort_keys=True).encode()).hexdigest()[:12]
             dest=classical/'heldout_selective'/tag
@@ -561,11 +560,13 @@ def main(argv=None):
                                     return False
                             return not json.loads((directory/'proposal_ablation_failures.json').read_text())
                         if kind=='channel':
-                            return validate_channel(directory,host.name)
+                            return validate_channel(directory,host.name,
+                                preset=args.reviewer_attack_preset, max_attacks=args.reviewer_max_attacks)
                         if kind=='audit':
                             return validate_security(directory,host.name,wrong_key_trials=8)
                         if kind=='bss':
-                            return validate_bss(directory,host.name,max_attacks=args.reviewer_max_attacks)
+                            return validate_bss(directory,host.name,max_attacks=args.reviewer_max_attacks,
+                                preset=args.reviewer_attack_preset)
                         if kind=='block':
                             state=json.loads((directory/'manifest.json').read_text())
                             return (state.get('status')=='complete'

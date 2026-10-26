@@ -27,11 +27,13 @@ def _numeric(row, cols):
     except (ValueError, TypeError, KeyError):return False
 
 
-def validate_channel(directory: Path, host: str):
+def validate_channel(directory: Path, host: str, *,
+                     preset: str = "reviewer_stress", max_attacks: int = 0):
     directory=Path(directory)
     rows=read_rows(directory/'channel_ablation.csv')
     manifest=_json(directory/'manifest.json')
-    attacks={x.name for x in default_attack_suite(False,'reviewer_stress')}
+    attacks_all = default_attack_suite(False, preset)
+    attacks={x.name for x in (attacks_all[:max_attacks] if max_attacks else attacks_all)}
     expected={(mode,'before_attack','no_attack') for mode in ('Y','R','G','B')}
     expected|={(mode,'after_attack',attack) for mode in ('Y','R','G','B') for attack in attacks}
     actual={(r.get('channel'),r.get('phase'),r.get('attack')) for r in rows}
@@ -41,11 +43,12 @@ def validate_channel(directory: Path, host: str):
             and all(r.get('host')==host and _numeric(r,('nc','ber','psnr_clean','ssim_clean')) for r in rows))
 
 
-def validate_bss(directory: Path, host: str, max_attacks:int=14):
+def validate_bss(directory: Path, host: str, max_attacks:int=14, *,
+                 preset: str = "reviewer_stress"):
     directory=Path(directory)
     rows=read_rows(directory/'bss_per_host_attack.csv')
     expected=[a.name for a in stratified_attack_subset(
-        default_attack_suite(include_none=False,preset='reviewer_stress'),max_attacks)]
+        default_attack_suite(include_none=False,preset=preset),max_attacks)]
     state=_json(directory/'manifest.json')
     per_host=_json(directory/Path(host).stem/'measurement_status.json')
     return (state.get('status')=='PASS' and state.get('n_hosts')==1
